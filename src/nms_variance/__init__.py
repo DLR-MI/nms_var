@@ -26,8 +26,9 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import torch
 from . import details
 
-def nms(boxes, scores, overlap, top_k):
+def nms_variance(boxes, scores, overlap, top_k):
     return details.nms_forward(boxes, scores, overlap, top_k)
 
