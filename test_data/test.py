@@ -47,7 +47,7 @@ def main():
     res = vars_xi - var[:vars_xi.shape[0], :]
     res *= res
     res = np.sqrt(res)
-    print("RMS of variance: ".format(np.mean(res, axis=0)))
+    print("RMS of variance: {}".format(np.mean(res, axis=0)))
 
     check_set(i, keep_custom)
     # np.save('test_data/keep.npy', keep.to('cpu').numpy())
