@@ -28,14 +28,17 @@
  */
 
 #include <torch/extension.h>
+#include <torch/library.h>
 #include <ATen/ATen.h>
 #include <ATen/AccumulateType.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <vector>
 #include <iostream>
 #include <cmath>
+#include <cub/block/block_reduce.cuh>
 
 // Hard-coded maximum. Increase if needed.
 #define MAX_COL_BLOCKS 1000
@@ -43,8 +46,8 @@
 #define DIVUP(m, n) (((m)+(n)-1) / (n))
 #define ULLBYTES (static_cast<int>(sizeof(unsigned long long)))
 
-//int64_t const threadsPerBlock = sizeof(unsigned long long) * 8;
-const int64_t threadsPerBlock = sizeof(ulonglong4) * 8; // 256 instead of 64 threads
+int64_t const threadsPerBlock = sizeof(unsigned long long) * 8;
+int64_t const threadsPerBlockLinear = 256;
 
 // The functions below originates from Fast R-CNN
 // See https://github.com/rbgirshick/py-faster-rcnn
@@ -66,20 +69,23 @@ __device__ inline bool devIoU(T const *const a, T const *const b, const float th
 
 //FIXME build merge this with the official torchvision implementation
 
-template<typename scalar_t>
-__global__ void nms_kernel(const int64_t n_boxes, const scalar_t nms_overlap_thresh,
-                           const scalar_t *dev_boxes, const int64_t *idx, int64_t *dev_mask) {
+template<typename T>
+__global__ void nms_kernel(const int64_t n_boxes,
+                           const T nms_overlap_thresh,
+                           const T *dev_boxes,
+                           const int64_t *idx,
+                           int64_t *dev_mask) {
     const int64_t row_start = blockIdx.y;
     const int64_t col_start = blockIdx.x;
 
-    // we can try to use a ulonglong4 instead of ulong to support 256 threads
+    // we can try to use a ulonglong2 instead of ulong to support 128 threads
 
     const int row_size =
             min(n_boxes - row_start * threadsPerBlock, threadsPerBlock);
     const int col_size =
             min(n_boxes - col_start * threadsPerBlock, threadsPerBlock);
 
-    __shared__ scalar_t block_boxes[threadsPerBlock * 4];
+    __shared__ T block_boxes[threadsPerBlock * 4];
     if (threadIdx.x < col_size) {
         block_boxes[threadIdx.x * 4 + 0] =
                 dev_boxes[idx[(threadsPerBlock * col_start + threadIdx.x)] * 4 + 0];
@@ -94,61 +100,63 @@ __global__ void nms_kernel(const int64_t n_boxes, const scalar_t nms_overlap_thr
 
     if (threadIdx.x < row_size) {
         const int cur_box_idx = threadsPerBlock * row_start + threadIdx.x;
-        const scalar_t *cur_box = dev_boxes + idx[cur_box_idx] * 4;
+        const T *cur_box = dev_boxes + idx[cur_box_idx] * 4;
         int i = 0;
-        unsigned long long t[4] = {0, 0, 0, 0};
-        //unsigned long long t = 0;
+        //unsigned long long t[2] = {0, 0};
+        unsigned long long t = 0;
         int start = 0;
         if (row_start == col_start) {
             start = threadIdx.x + 1;
         }
         for (i = start; i < col_size; i++) {
             if (devIoU(cur_box, block_boxes + i * 4, nms_overlap_thresh)) {
-                //t |= 1ULL << i;
-                t[i / ULLBYTES] |= 1ULL << i;
+                t |= 1ULL << i; // cap to 64 for debugging
+                //t[i / ULLBYTES] |= 1ULL << i;
             }
         }
         const int col_blocks = DIVUP(n_boxes, threadsPerBlock);
-        //memcpy(&dev_mask[cur_box_idx * col_blocks + col_start], t, sizeof(unsigned long long) * 4);
-        dev_mask[cur_box_idx * col_blocks + col_start] = t[0];
+        //memcpy(&dev_mask[cur_box_idx * col_blocks + col_start], t, sizeof(unsigned long long) * 2);
+        dev_mask[cur_box_idx * col_blocks + col_start] = t;//t[0];
     }
 }
 
-
+// FIXME Off by one error, fucks up mean and variance
 __global__ void
-nms_collect(const int64_t boxes_num, const int64_t col_blocks, int64_t top_k, const int64_t *idx, const int64_t *mask,
-            int64_t *keep, int64_t *parent_object_index, int64_t *num_to_keep) {
+nms_collect(const int64_t boxes_num,
+            const int64_t col_blocks,
+            int64_t top_k,
+            const int64_t *dets,
+            const int64_t *idx,
+            int64_t *keep,
+            int64_t *parent_object_index,
+            int64_t *parent_object_count,
+            int64_t *num_to_keep) {
+
     int64_t remv[MAX_COL_BLOCKS] = {0};
     int64_t num_to_keep_ = 0;
-
-    /*
-    for (int i = 0; i < col_blocks; i++) {
-        remv[i] = 0;
-    }*/
-
-    /*
-    for (int i = 0; i < boxes_num; ++i) {
-        parent_object_index[i] = 0;
-    }*/
 
     for (int i = 0; i < boxes_num; i++) {
         int nblock = i / threadsPerBlock;
         int inblock = i % threadsPerBlock;
 
         if (!(remv[nblock] & (1ULL << inblock))) {
-            int64_t idxi = idx[i];
-            keep[num_to_keep_] = idxi;
-            const int64_t *p = &mask[0] + i * col_blocks;
+            keep[num_to_keep_] = idx[i];
+
+            const int64_t *p = &dets[0] + i * col_blocks;
             for (int j = nblock; j < col_blocks; j++) {
                 remv[j] |= p[j];
             }
-            for (int j = (i + 1); j < boxes_num; j++) {
+            for (int j = (i + 1);
+                 j < boxes_num; j++) { // (i + 1) to avoid visiting the diagonal elements (i.e. self-intersection)
                 int nblockj = j / threadsPerBlock;
                 int inblockj = j % threadsPerBlock;
-                if (p[nblockj] & (1ULL << inblockj))
+                if (p[nblockj] & (1ULL << inblockj)) {
                     parent_object_index[idx[j]] = num_to_keep_ + 1;
+                    parent_object_count[num_to_keep_] += 1;
+                }
             }
             parent_object_index[idx[i]] = num_to_keep_ + 1;
+            parent_object_count[num_to_keep_] += 1;
 
             num_to_keep_++;
 
@@ -157,87 +165,224 @@ nms_collect(const int64_t boxes_num, const int64_t col_blocks, int64_t top_k, co
         }
     }
 
-    /*
-    // Initialize the rest of the keep array to avoid uninitialized values.
-    for (int i = num_to_keep_; i < boxes_num; ++i)
-        keep[i] = 0;
-    */
-
     *num_to_keep = min(top_k, num_to_keep_);
 }
 
-template<typename scalar_t>
-__global__ void indexed_variance(const int64_t parent_object_index_num,
-                                 const int64_t *parent_object_index,
-                                 const scalar_t *dev_boxes,
-                                 scalar_t *mean) {
-
-}
-
-
-#define CHECK_CONTIGUOUS(x) AT_ASSERTM(x.is_contiguous(), #x " must be contiguous")
 
 #define PARENT_INDEX(x) ((x) - 1)
 
+template<typename T>
+__global__ void indexed_mean(const int64_t parent_object_num,
+                             const T *dev_boxes,
+                             const int64_t *parent_object_index,
+                             const int64_t *parent_object_count,
+                             T *mean_per_parent) {
+    __shared__ float4 mean_accm[threadsPerBlockLinear];  //local block memory cache
+
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (i >= parent_object_num) {
+        return;
+    }
+
+    float inv_N = 1.0f / static_cast<float>(parent_object_count[PARENT_INDEX(parent_object_index[i])]);
+    inv_N = isinf(inv_N) ? 0.0f : inv_N;
+
+    const float4 boxes = *reinterpret_cast<const float4 *>(&dev_boxes[i * 4]);
+    mean_accm[threadIdx.x] = {
+            0.5f * (boxes.x + boxes.z) * inv_N,
+            0.5f * (boxes.y + boxes.w) * inv_N,
+            (boxes.z - boxes.x) * inv_N,
+            (boxes.w - boxes.y) * inv_N
+    };
+
+    __syncthreads();
+
+    // write (this is done by one thread)
+    if (threadIdx.x == 0) {
+        for (int j = 0; j < blockDim.x; j++) {
+            const int k = j + blockIdx.x * blockDim.x;
+            if (k < parent_object_num) {
+                mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 0] += mean_accm[j].x;
+                mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 1] += mean_accm[j].y;
+                mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 2] += mean_accm[j].z;
+                mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 3] += mean_accm[j].w;
+            }
+        }
+    }
+}
+
+template<>
+__global__ void indexed_mean(const int64_t parent_object_num,
+                             const double *dev_boxes,
+                             const int64_t *parent_object_index,
+                             const int64_t *parent_object_count,
+                             double *mean_per_parent) {
+    __shared__ double4 mean_accm[threadsPerBlockLinear];  //local block memory cache
+
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (i >= parent_object_num) {
+        return;
+    }
+
+    double inv_N = 1.0 / static_cast<double>(parent_object_count[PARENT_INDEX(parent_object_index[i])]);
+    inv_N = isinf(inv_N) ? 0.0 : inv_N;
+
+    const double4 boxes = *reinterpret_cast<const double4 *>(&dev_boxes[i * 4]);
+    mean_accm[threadIdx.x] = {
+            0.5 * (boxes.x + boxes.z) * inv_N,
+            0.5 * (boxes.y + boxes.w) * inv_N,
+            (boxes.z - boxes.x) * inv_N,
+            (boxes.w - boxes.y) * inv_N
+    };
+
+    __syncthreads();
+
+    // write (this is done by one thread)
+    if (threadIdx.x == 0) {
+        for (int j = 0; j < blockDim.x; j++) {
+            const int k = j + blockIdx.x * blockDim.x;
+            if (k < parent_object_num) {
+                mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 0] += mean_accm[j].x;
+                mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 1] += mean_accm[j].y;
+                mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 2] += mean_accm[j].z;
+                mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 3] += mean_accm[j].w;
+            }
+        }
+    }
+}
+
+template<typename T>
+__global__ void indexed_var(const int64_t parent_object_num,
+                            const T *dev_boxes,
+                            const int64_t *parent_object_index,
+                            const int64_t *parent_object_count,
+                            const T *mean_per_parent,
+                            T *var_per_parent) {
+    __shared__ float4 var_accm[threadsPerBlockLinear];  //local block memory cache
+
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (i >= parent_object_num) {
+        return;
+    }
+
+    float inv_N = 1.0f / (static_cast<float>(parent_object_count[PARENT_INDEX(parent_object_index[i])]) - 1.0f);
+    inv_N = isinf(inv_N) ? 0.0f : inv_N;
+
+    const float4 boxes = *reinterpret_cast<const float4 *>(&dev_boxes[i * 4]);
+    const float4 mean = *reinterpret_cast<const float4 *>(&mean_per_parent[PARENT_INDEX(parent_object_index[i]) * 4]);
+    float4 tmp = {mean.x - 0.5f * (boxes.x + boxes.z),
+                  mean.y - 0.5f * (boxes.y + boxes.w),
+                  mean.z - (boxes.z - boxes.x),
+                  mean.w - (boxes.w - boxes.y)};
+
+    var_accm[threadIdx.x] = {tmp.x * tmp.x * inv_N,
+                             tmp.y * tmp.y * inv_N,
+                             tmp.z * tmp.z * inv_N,
+                             tmp.w * tmp.w * inv_N};
+
+    __syncthreads();
+
+    // write (this is done by one thread)
+    if (threadIdx.x == 0) {
+        for (int j = 0; j < blockDim.x; j++) {
+            const int k = j + blockIdx.x * blockDim.x;
+            if (k < parent_object_num) {
+                var_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 0] += var_accm[j].x;
+                var_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 1] += var_accm[j].y;
+                var_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 2] += var_accm[j].z;
+                var_per_parent[PARENT_INDEX(parent_object_index[k]) * 4 + 3] += var_accm[j].w;
+            }
+        }
+    }
+}
+
 std::vector<at::Tensor> nms_cuda_forward(
-        at::Tensor boxes,
-        at::Tensor idx,
+        at::Tensor &dets,
+        at::Tensor &scores,
         float nms_overlap_thresh,
         unsigned long top_k) {
 
-    const auto boxes_num = boxes.size(0);
+    if (dets.numel() == 0) {
+        return {at::empty({0}, dets.options().dtype(at::kLong))};
+    }
 
-    const int col_blocks = DIVUP(boxes_num, threadsPerBlock);
+    auto idx = std::get<1>(scores.sort(/*stable=*/true, /*dim=*/0, /* descending=*/true));
+
+    int dets_num = dets.size(0);
+
+    const int col_blocks = DIVUP(dets_num, threadsPerBlock);
 
     AT_ASSERTM(col_blocks < MAX_COL_BLOCKS,
                "The number of column blocks must be less than MAX_COL_BLOCKS. Increase the MAX_COL_BLOCKS constant if needed.");
 
     auto longOptions = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kLong);
-    auto mask = at::empty({boxes_num * col_blocks}, longOptions);
-
-    dim3 blocks(DIVUP(boxes_num, threadsPerBlock),
-                DIVUP(boxes_num, threadsPerBlock));
-    dim3 threads(threadsPerBlock);
-
-    CHECK_CONTIGUOUS(boxes);
-    CHECK_CONTIGUOUS(idx);
-    CHECK_CONTIGUOUS(mask);
-
-    AT_DISPATCH_FLOATING_TYPES(boxes.type(), "nms_cuda_forward", ([&] {
-        nms_kernel<<<blocks, threads>>>(boxes_num,
-                                        (scalar_t) nms_overlap_thresh,
-                                        boxes.data_ptr<scalar_t>(),
-                                        idx.data_ptr<int64_t>(),
-                                        mask.data_ptr<int64_t>());
-    }));
-
-    auto keep = at::zeros({boxes_num}, longOptions);
-    auto parent_object_index = at::zeros({boxes_num}, longOptions);
+    auto mask = at::empty({dets_num * col_blocks}, dets.options().dtype(at::kLong));
+    auto keep = at::zeros({dets_num}, longOptions);
+    auto parent_object_index = at::zeros({dets_num}, longOptions);
+    auto parent_object_count = at::zeros({dets_num}, longOptions);
     auto num_to_keep = at::empty({}, longOptions);
 
-    // try this in parallel, also with (j = i+1)
-    nms_collect<<<1, 1>>>(boxes_num, col_blocks, top_k,
-                          idx.data_ptr<int64_t>(),
+    dim3 blocks(col_blocks, col_blocks);
+    dim3 threads(threadsPerBlock);
+
+    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_cuda_forward", ([&] {
+        nms_kernel<scalar_t><<<blocks, threads>>>(dets_num,
+                                                  (scalar_t) nms_overlap_thresh,
+                                                  dets.data_ptr<scalar_t>(),
+                                                  idx.data_ptr<int64_t>(),
+                                                  mask.data_ptr<int64_t>());
+    }));
+
+    nms_collect<<<1, 1>>>(dets_num, col_blocks, top_k,
                           mask.data_ptr<int64_t>(),
+                          idx.data_ptr<int64_t>(),
                           keep.data_ptr<int64_t>(),
                           parent_object_index.data_ptr<int64_t>(),
+                          parent_object_count.data_ptr<int64_t>(),
                           num_to_keep.data_ptr<int64_t>());
 
     auto num_to_keep_cpu = num_to_keep.to(torch::kCPU);
     auto parent_object_index_cpu = parent_object_index.to(torch::kCPU);
-    auto boxes_cpu = boxes.to(torch::kCPU);
+    auto boxes_cpu = dets.to(torch::kCPU);
 
     const auto num_to_keep_size = num_to_keep_cpu.data_ptr<int64_t>()[0];
     const auto floatOptions = torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat);
     auto samples_N = torch::zeros(num_to_keep_size, torch::TensorOptions().device(torch::kCPU).dtype(torch::kLong));
     auto mean = torch::zeros(num_to_keep_size * 4, floatOptions);
     auto variance = torch::zeros(num_to_keep_size * 4, floatOptions);
+    auto mean_per_parent = torch::zeros(num_to_keep_size * 4,
+                                        torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+    auto var_per_parent = torch::zeros(num_to_keep_size * 4,
+                                       torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
 
     auto parent_obj_idx_ptr = parent_object_index_cpu.data_ptr<int64_t>();
     auto boxes_ptr = boxes_cpu.data_ptr<float>();
     auto sample_ptr = samples_N.data_ptr<int64_t>();
     auto mean_ptr = mean.data_ptr<float>();
     auto var_ptr = variance.data_ptr<float>();
+
+    blocks = {static_cast<unsigned int>(DIVUP(parent_object_index.size(0), threadsPerBlockLinear)), 1, 1};
+    threads = {threadsPerBlockLinear, 1, 1};
+
+    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "indexed_mean", ([&] {
+        indexed_mean<scalar_t><<<blocks, threads>>>(parent_object_index.size(0),
+                                                    dets.data_ptr<scalar_t>(),
+                                                    parent_object_index.data_ptr<int64_t>(),
+                                                    parent_object_count.data_ptr<int64_t>(),
+                                                    mean_per_parent.data_ptr<scalar_t>());
+    }));
+
+    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "indexed_var", ([&] {
+        indexed_var<scalar_t><<<blocks, threads>>>(parent_object_index.size(0),
+                                                   dets.data_ptr<scalar_t>(),
+                                                   parent_object_index.data_ptr<int64_t>(),
+                                                   parent_object_count.data_ptr<int64_t>(),
+                                                   mean_per_parent.data_ptr<scalar_t>(),
+                                                   var_per_parent.data_ptr<scalar_t>());
+    }));
 
     // Compute number of samples
     for (int i = 0; i < parent_object_index_cpu.size(0); i++) {
@@ -274,6 +419,6 @@ std::vector<at::Tensor> nms_cuda_forward(
         var_ptr[index + 3] += y2y1 * y2y1 * inv_N;
     }
 
-    return {keep, num_to_keep, parent_object_index, variance};
+    return {keep, num_to_keep, parent_object_index, variance, var_per_parent};
 }
 
