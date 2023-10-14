@@ -24,7 +24,7 @@ def check_set(set_a, set_b):
 
 def run_nms(boxes, scores, overlap=.7, top_k=200):
     t0 = time.time()
-    keep_custom, num_to_keep, parent_object_index, var = nms_variance(boxes, scores, overlap=overlap, top_k=top_k)
+    keep_custom, num_to_keep, parent_object_index, var, var_cuda = nms_variance(boxes, scores, overlap=overlap, top_k=top_k)
     t1 = time.time()
     keep_torch = nms(boxes, scores, overlap)
     t2 = time.time()
@@ -32,7 +32,10 @@ def run_nms(boxes, scores, overlap=.7, top_k=200):
     print("Torchvision approach took: {} ms".format((t2 - t1) * 1000))
     delta = torch.sum(keep_custom[:num_to_keep.item()] - keep_torch).cpu().numpy() == 0
     print("Equal? {}".format(delta))
-    return keep_custom[:num_to_keep.item()].cpu().numpy(), keep_torch.cpu().numpy(), var.numpy().reshape(num_to_keep.item(), 4)
+    print(var)
+    print(var_cuda)
+    return keep_custom[:num_to_keep.item()].cpu().numpy(), keep_torch.cpu().numpy(), \
+        var.numpy().reshape(num_to_keep.item(), 4), var_cuda.cpu().float().numpy().reshape(num_to_keep.item(), 4)
 
 
 def main():
@@ -42,12 +45,18 @@ def main():
     vars_xi = np.load('test_data/vars_xi.npy')
     i = np.load('test_data/i.npy')
 
-    keep_custom, keep_torch, var = run_nms(boxes, scores)
+    keep_custom, keep_torch, var, var_cuda = run_nms(boxes, scores)
 
     res = vars_xi - var[:vars_xi.shape[0], :]
     res *= res
     res = np.sqrt(res)
-    print("RMS of variance: {}".format(np.mean(res, axis=0)))
+    print("RMS of variance cpu: {}".format(np.mean(res, axis=0)))
+
+    res = vars_xi - var_cuda[:vars_xi.shape[0], :]
+    res *= res
+    res = np.sqrt(res)
+    print("RMS of variance cuda: {}".format(np.mean(res, axis=0)))
+
 
     check_set(i, keep_custom)
     # np.save('test_data/keep.npy', keep.to('cpu').numpy())
