@@ -32,28 +32,40 @@
 #include <iostream>
 
 std::vector<at::Tensor> nms_cuda_forward(
-        at::Tensor boxes,
-        at::Tensor idx,
+        at::Tensor &dets,
+        at::Tensor &scores,
         float nms_overlap_thresh,
         unsigned long top_k);
 
-#define CHECK_CUDA(x) AT_ASSERTM(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) AT_ASSERTM(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
 std::vector<at::Tensor> nms_forward(
-        at::Tensor boxes,
-        at::Tensor scores,
+        at::Tensor &dets,
+        at::Tensor &scores,
         float thresh,
         unsigned long top_k) {
 
+    TORCH_CHECK(dets.is_cuda(), "dets must be a CUDA tensor");
+    TORCH_CHECK(scores.is_cuda(), "scores must be a CUDA tensor");
 
-    auto idx = std::get<1>(scores.sort(0,true));
+    TORCH_CHECK(
+            dets.dim() == 2, "boxes should be a 2d tensor, got ", dets.dim(), "D");
+    TORCH_CHECK(
+            dets.size(1) == 4,
+            "boxes should have 4 elements in dimension 1, got ",
+            dets.size(1));
+    TORCH_CHECK(
+            scores.dim() == 1,
+            "scores should be a 1d tensor, got ",
+            scores.dim(),
+            "D");
+    TORCH_CHECK(
+            dets.size(0) == scores.size(0),
+            "boxes and scores should have same number of elements in ",
+            "dimension 0, got ",
+            dets.size(0),
+            " and ",
+            scores.size(0))
 
-    CHECK_INPUT(boxes);
-    CHECK_INPUT(idx);
-
-    return nms_cuda_forward(boxes, idx, thresh, top_k);
+    return nms_cuda_forward(dets, scores, thresh, top_k);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
