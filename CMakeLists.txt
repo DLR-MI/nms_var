@@ -4,7 +4,7 @@ project(PYTORCH_NMS_VARIANCE CXX CUDA)
 find_package(Torch REQUIRED PATHS $ENV{HOME}/libtorch)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
-add_library(nms_variance_cu STATIC src/nms_kernel.cu)
+add_library(nms_variance_cu STATIC src/cuda/nms_var_kernel.cu)
 target_include_directories(nms_variance_cu PRIVATE "${TORCH_INCLUDE_DIRS}")
 set_property(TARGET nms_variance_cu PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET nms_variance_cu PROPERTY POSITION_INDEPENDENT_CODE ON)

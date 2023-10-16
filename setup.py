@@ -1,7 +1,12 @@
-from setuptools import setup
-from torch.utils.cpp_extension import CUDAExtension, BuildExtension
+from setuptools import setup, Extension
+from torch.utils import cpp_extension
 
-setup(name='nms_variance', packages=['nms_variance'],
+setup(name='nms_with_variance', packages=['nms_with_variance'],
       package_dir={'': 'src'},
-      ext_modules=[CUDAExtension('nms_variance.details', ['src/nms.cpp', 'src/nms_kernel.cu'])],
-      cmdclass={'build_ext': BuildExtension})
+      ext_modules=[
+            cpp_extension.CUDAExtension('nms_with_variance.details',
+                                        ['src/nms.cpp', 'src/cuda/nms_var_kernel.cu'])
+      ],
+      cmdclass={
+            'build_ext': cpp_extension.BuildExtension
+      })

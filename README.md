@@ -1,39 +1,30 @@
-# Torchvision support for NMS
+# Implementation of NMS (non maximum suppression) with variance as a PyTorch extension.
 
-Note: Since the publication of this repository, NMS support has been included as part of torchvision. Therefore you might want to use this implementation instead:
-https://github.com/pytorch/vision/blob/master/torchvision/ops/boxes.py.
+This repository includes an implementation of NMS with variance based on PyTorch ***. 
+CPU and CUDA backends are supported and automatically chosen based on the device of the provided tensors.
 
-This repository might still be of interest if you need the index in the `keep` list of the highest-scoring box overlapping each input box.
-
-# CUDA implementation of NMS for PyTorch.
-
-
-This repository has a CUDA implementation of NMS for PyTorch 1.4.0.
-
-The code is released under the BSD license however it also includes parts of the original implementation from [Fast R-CNN](https://github.com/rbgirshick/py-faster-rcnn) which falls under the MIT license (see LICENSE file for details).
-
-The code is experimental and has not be thoroughly tested yet; use at your own risk. Any issues and pull requests are welcome.
+This code is based on the official [Torchvision](https://github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cuda/nms_kernel.cu) implementation of NMS and includes code from an older implementation by [Grégoire Payen de La Garanderie](https://github.com/gdlg/pytorch_nms/blob/master/src/nms_kernel.cu).
 
 ## Installation
 
+You can install it either via Python directly or using pip.
+
+### Python
 ```
-python setup.py install
+python setup.py install --install-lib <your_install_location>
+```
+### PIP
+```
+pip install --target=<your_custom_target> <repository_link>
 ```
 
 ## Usage
 
-Example:
+After building, you can use this package just as any other ordinary package. See ```__init__.py```for docs.
+
 ```
-from nms import nms
+from nms_with_variance import nms_with_variance
 
-keep, num_to_keep, parent_object_index = nms(boxes, scores, overlap=.5, top_k=200)
+kept_indices, num_kept_indices, var_per_kept = nms_with_variance(boxes, scores, overlap=.5, top_k=200)
 ```
-
-The `nms` function takes a (N,4) tensor of `boxes` and associated (N) tensor of `scores`, sorts the bounding boxes by score and selects boxes using Non-Maximum Suppression according to the given `overlap`. It returns the indices of the `top_k` with the highest score. Bounding boxes are represented using the standard (left,top,right,bottom) coordinates representation.
-
-`keep` is the list of indices of kept bounding boxes. Note that the tensor size is always (N) however only the first `num_to_keep` entries are valid.
-
-For each input box, the (N) tensor `parent_object_index` contains the index (1-based) in the `keep` list of the highest-scoring box overlapping this box. This can be useful to group input boxes that are related to the same object. The index 0 represents a background box which has been ignored due to `top_k`.
-
-Currently there is a hard-limit of 64,000 input boxes. You can change the constant `MAX_COL_BLOCKS` in `nms_kernel.cu` to increase this limit.
 
