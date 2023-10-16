@@ -20,6 +20,12 @@ def nms_with_variance(boxes, scores, overlap, top_k):
 
     Returns
     -------
+    keep_custom : tuple
+        A tuple consisting of:
 
+            - Torch tensor of size (N) containing the indices of the M kept bounding boxes. This tensors is always of input size N but padded with zeros.
+            - A zero-dimensional tensor containing a the number of items kept as a scalar.
+              Retrieve with ```num_to_keep.item()```
+            - Tensor of size (N,4) containing the variance for each kept item with respect to all overlapping bounding boxes.
     """
     return details.nms_with_variance(boxes, scores, overlap, top_k)
