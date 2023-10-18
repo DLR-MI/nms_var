@@ -11,11 +11,13 @@ You can install it either via Python directly or using pip.
 
 ### Python
 ```
-python setup.py install --install-lib <your_install_location>
+git clone <repository_link>
+python pytorch-nms-variance/setup.py install --install-lib <your_install_location>
 ```
 ### PIP
 ```
-pip install --target=<your_custom_target> <repository_link>
+git clone <repository_link>
+pip install --target=<your_custom_target> pytorch-nms-variance/
 ```
 
 ## Usage
