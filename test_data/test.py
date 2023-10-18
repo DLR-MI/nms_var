@@ -43,18 +43,16 @@ def run_nms(boxes, scores, overlap=.7, top_k=200):
 
     """
     t0 = time.time()
-    keep_custom, num_to_keep, var_per_kept_index = nms_with_variance(boxes, scores, overlap=overlap, top_k=top_k)
+    keep_custom, var_per_kept_index = nms_with_variance(boxes, scores, overlap=overlap, top_k=top_k)
     t1 = time.time()
     keep_torch = nms(boxes, scores, overlap)
     t2 = time.time()
     print("Custom approach took: {} ms".format((t1 - t0) * 1000))
     print("Torchvision approach took: {} ms".format((t2 - t1) * 1000))
-    delta = torch.sum(keep_custom[:num_to_keep.item()] - keep_torch).cpu().numpy() == 0
+    delta = torch.sum(keep_custom - keep_torch).cpu().numpy() == 0
     print("Equal? {}".format(delta))
     print(var_per_kept_index)
-    return keep_custom[:num_to_keep.item()].cpu().numpy(), \
-        keep_torch.cpu().numpy(), \
-        var_per_kept_index.cpu().numpy().reshape(num_to_keep.item(), 4)
+    return keep_custom.cpu().numpy(), keep_torch.cpu().numpy(), var_per_kept_index.cpu().numpy()
 
 
 def main():
