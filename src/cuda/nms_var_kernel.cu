@@ -27,6 +27,11 @@ https://github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cuda/nms_kernel
 int64_t const threadsPerBlock = sizeof(unsigned long long) * 8;
 int64_t const threadsPerBlockLinear = 256;
 
+
+//FIXME Check if pivot is included in mean and variance, check the normalization factor
+//FIXME Investigate the bias in IoU computation to get at least one pixel coverage
+//TODO Add variance over candidate scores
+
 template<typename T, typename Ts>
 __device__ inline bool devIoU(const T &a, const T &b, const float threshold) {
     Ts left = max(a.x, b.x), right = min(a.z, b.z);
@@ -221,6 +226,7 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
         for (int j = 0; j < blockDim.x; j++) {
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
+                //FIXME I'm not sure if these really help here or just make things slower. Maybe let the compiler figure this out
                 float4 mean = *reinterpret_cast<float4*>(&mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4]);
                 mean = { mean.x + mean_accm[j].x,
                          mean.y + mean_accm[j].y,
@@ -315,6 +321,7 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
         for (int j = 0; j < blockDim.x; j++) {
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
+                //FIXME I'm not sure if these really help here or just make things slower. Maybe let the compiler figure this out
                 float4 var = *reinterpret_cast<float4*>(&var_per_parent[PARENT_INDEX(parent_object_index[k]) * 4]);
                 var = { var.x + var_accm[j].x,
                         var.y + var_accm[j].y,
