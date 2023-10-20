@@ -36,11 +36,11 @@ template<typename T, typename Ts>
 __device__ inline bool devIoU(const T &a, const T &b, const float threshold) {
     Ts left = max(a.x, b.x), right = min(a.z, b.z);
     Ts top = max(a.y, b.y), bottom = min(a.w, b.w);
-    Ts width = max(right - left, (Ts) 0), height = max(bottom - top, (Ts) 0);
+    Ts width = max(right - left + 1, (Ts) 0), height = max(bottom - top + 1, (Ts) 0);
     using acc_T = at::acc_type<Ts, /*is_cuda=*/true>;
     acc_T interS = (acc_T) width * height;
-    acc_T Sa = ((acc_T) a.z - a.x) * (a.w - a.y);
-    acc_T Sb = ((acc_T) b.z - b.x) * (b.w - b.y);
+    acc_T Sa = ((acc_T) a.z - a.x + 1) * (a.w - a.y + 1);
+    acc_T Sb = ((acc_T) b.z - b.x + 1) * (b.w - b.y + 1);
     return (interS / (Sa + Sb - interS)) > threshold;
 }
 
