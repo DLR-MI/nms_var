@@ -174,7 +174,7 @@ nms_reduce_impl(const int boxes_num,
                     parent_object_index[idx[j]] = num_to_keep_ + 1;
                 }
             }
-            parent_object_index[idx[i]] = num_to_keep_ + 1;
+            //parent_object_index[idx[i]] = num_to_keep_ + 1;
             num_to_keep_++;
 
             if (num_to_keep_ == top_k)
