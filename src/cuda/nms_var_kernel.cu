@@ -195,11 +195,12 @@ nms_reduce_impl(const int boxes_num,
 template<typename T>
 __global__ void nms_mean_impl(const int64_t parent_object_num,
                               const T *dev_boxes,
-                              /*const T* dev_scores,*/
                               const int64_t *parent_ref_index,
                               const int64_t *parent_ref_count,
                               T *mean_per_parent) {
-    __shared__ float4 mean_accm[threadsPerBlockLinear];  //local block memory cache
+    using Tvec = typename std::conditional<std::is_same<T, float>::value, float4, double4>::type;
+
+    __shared__ Tvec mean_accm[threadsPerBlockLinear];  //local block memory cache
 
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -207,14 +208,15 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
         return;
     }
 
-    float inv_N = 1.0f / static_cast<float>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]);
-    inv_N = isinf(inv_N) ? 0.0f : inv_N;
+    T inv_N = static_cast<T>(1.0) / static_cast<float>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]);
+    inv_N = isinf(inv_N) ? 0.0 : inv_N;
 
     // coalesced loads using float4 vector types
-    const float4 boxes = *reinterpret_cast<const float4 *>(&dev_boxes[i * 4]);
+    //FIXME we can try a stride of 5 to include the scores here
+    const auto boxes = *reinterpret_cast<const Tvec *>(&dev_boxes[i * 4]);
     mean_accm[threadIdx.x] = {
-            0.5f * (boxes.x + boxes.z) * inv_N,
-            0.5f * (boxes.y + boxes.w) * inv_N,
+            static_cast<T>(0.5) * (boxes.x + boxes.z) * inv_N,
+            static_cast<T>(0.5) * (boxes.y + boxes.w) * inv_N,
             (boxes.z - boxes.x) * inv_N,
             (boxes.w - boxes.y) * inv_N
     };
@@ -228,71 +230,30 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
                 //FIXME I'm not sure if these really help here or just make things slower. Maybe let the compiler figure this out
-                float4 mean = *reinterpret_cast<float4*>(&mean_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
-                mean = { mean.x + mean_accm[j].x,
-                         mean.y + mean_accm[j].y,
-                         mean.z + mean_accm[j].z,
-                         mean.w + mean_accm[j].w};
-                reinterpret_cast<float4*>(mean_per_parent)[PARENT_INDEX(parent_ref_index[k])] = mean;
+                //TODO include stride of 5 to include the score as a float
+                auto mean = *reinterpret_cast<Tvec *>(&mean_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
+                mean = {mean.x + mean_accm[j].x,
+                        mean.y + mean_accm[j].y,
+                        mean.z + mean_accm[j].z,
+                        mean.w + mean_accm[j].w};
+                reinterpret_cast<Tvec *>(mean_per_parent)[PARENT_INDEX(parent_ref_index[k])] = mean;
             }
         }
     }
 }
 
-// Template specialization required for double4 vector types
-template<>
-__global__ void nms_mean_impl<double>(const int64_t parent_object_num,
-                                      const double *dev_boxes,
-                                      const int64_t *parent_ref_index,
-                                      const int64_t *parent_ref_count,
-                                      double *mean_per_parent) {
-    __shared__ double4 mean_accm[threadsPerBlockLinear];  //local block memory cache
-
-    const int i = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (i >= parent_object_num) {
-        return;
-    }
-
-    double inv_N = 1.0 / static_cast<double>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]);
-    inv_N = isinf(inv_N) ? 0.0 : inv_N;
-
-    const double4 boxes = *reinterpret_cast<const double4 *>(&dev_boxes[i * 4]);
-    mean_accm[threadIdx.x] = {
-            0.5 * (boxes.x + boxes.z) * inv_N,
-            0.5 * (boxes.y + boxes.w) * inv_N,
-            (boxes.z - boxes.x) * inv_N,
-            (boxes.w - boxes.y) * inv_N
-    };
-
-    __syncthreads();
-
-    // write (this is done by one thread)
-    if (threadIdx.x == 0) {
-        for (int j = 0; j < blockDim.x; j++) {
-            const int k = j + blockIdx.x * blockDim.x;
-            if (k < parent_object_num) {
-                double4 mean = *reinterpret_cast<double4*>(&mean_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
-                mean = { mean.x + mean_accm[j].x,
-                         mean.y + mean_accm[j].y,
-                         mean.z + mean_accm[j].z,
-                         mean.w + mean_accm[j].w};
-                reinterpret_cast<double4*>(mean_per_parent)[PARENT_INDEX(parent_ref_index[k])] = mean;
-            }
-        }
-    }
-}
 
 //TODO Add score variance
 template<typename T>
 __global__ void nms_var_impl(const int64_t parent_object_num,
                              const T *dev_boxes,
-                             /*const T* dev_scores,*/
                              const int64_t *parent_ref_index,
                              const int64_t *parent_ref_count,
                              const T *mean_per_parent,
                              T *var_per_parent) {
-    __shared__ float4 var_accm[threadsPerBlockLinear];  //local block memory cache
+    using Tvec = typename std::conditional<std::is_same<T, float>::value, float4, double4>::type;
+
+    __shared__ Tvec var_accm[threadsPerBlockLinear];  //local block memory cache
 
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -300,15 +261,15 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
         return;
     }
 
-    float inv_N = 1.0f / (static_cast<float>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]) - 1.0f);
+    T inv_N = 1.0 / (static_cast<float>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]) - 1.0);
     inv_N = isinf(inv_N) ? 0.0f : inv_N;
 
-    const float4 boxes = *reinterpret_cast<const float4 *>(&dev_boxes[i * 4]);
-    const float4 mean = *reinterpret_cast<const float4 *>(&mean_per_parent[PARENT_INDEX(parent_ref_index[i]) * 4]);
-    float4 tmp = {mean.x - 0.5f * (boxes.x + boxes.z),
-                  mean.y - 0.5f * (boxes.y + boxes.w),
-                  mean.z - (boxes.z - boxes.x),
-                  mean.w - (boxes.w - boxes.y)};
+    const auto boxes = *reinterpret_cast<const Tvec *>(&dev_boxes[i * 4]);
+    const auto mean = *reinterpret_cast<const Tvec *>(&mean_per_parent[PARENT_INDEX(parent_ref_index[i]) * 4]);
+    Tvec tmp = {mean.x - static_cast<T>(0.5) * (boxes.x + boxes.z),
+                mean.y - static_cast<T>(0.5) * (boxes.y + boxes.w),
+                mean.z - (boxes.z - boxes.x),
+                mean.w - (boxes.w - boxes.y)};
 
     var_accm[threadIdx.x] = {tmp.x * tmp.x * inv_N,
                              tmp.y * tmp.y * inv_N,
@@ -323,64 +284,17 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
                 //FIXME I'm not sure if these really help here or just make things slower. Maybe let the compiler figure this out
-                float4 var = *reinterpret_cast<float4*>(&var_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
-                var = { var.x + var_accm[j].x,
-                        var.y + var_accm[j].y,
-                        var.z + var_accm[j].z,
-                        var.w + var_accm[j].w};
-                reinterpret_cast<float4*>(var_per_parent)[PARENT_INDEX(parent_ref_index[k])] = var;
+                auto var = *reinterpret_cast<Tvec *>(&var_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
+                var = {var.x + var_accm[j].x,
+                       var.y + var_accm[j].y,
+                       var.z + var_accm[j].z,
+                       var.w + var_accm[j].w};
+                reinterpret_cast<Tvec *>(var_per_parent)[PARENT_INDEX(parent_ref_index[k])] = var;
             }
         }
     }
 }
 
-template<>
-__global__ void nms_var_impl<double>(const int64_t parent_object_num,
-                                     const double *dev_boxes,
-                                     const int64_t *parent_ref_index,
-                                     const int64_t *parent_ref_count,
-                                     const double *mean_per_parent,
-                                     double *var_per_parent) {
-    __shared__ double4 var_accm[threadsPerBlockLinear];  //local block memory cache
-
-    const int i = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (i >= parent_object_num) {
-        return;
-    }
-
-    double inv_N = 1.0 / (static_cast<double>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]) - 1.0f);
-    inv_N = isinf(inv_N) ? 0.0 : inv_N;
-
-    const double4 boxes = *reinterpret_cast<const double4 *>(&dev_boxes[i * 4]);
-    const double4 mean = *reinterpret_cast<const double4 *>(&mean_per_parent[PARENT_INDEX(parent_ref_index[i]) * 4]);
-    double4 tmp = {mean.x - 0.5 * (boxes.x + boxes.z),
-                   mean.y - 0.5 * (boxes.y + boxes.w),
-                   mean.z - (boxes.z - boxes.x),
-                   mean.w - (boxes.w - boxes.y)};
-
-    var_accm[threadIdx.x] = {tmp.x * tmp.x * inv_N,
-                             tmp.y * tmp.y * inv_N,
-                             tmp.z * tmp.z * inv_N,
-                             tmp.w * tmp.w * inv_N};
-
-    __syncthreads();
-
-    // write (this is done by one thread)
-    if (threadIdx.x == 0) {
-        for (int j = 0; j < blockDim.x; j++) {
-            const int k = j + blockIdx.x * blockDim.x;
-            if (k < parent_object_num) {
-                double4 var = *reinterpret_cast<double4*>(&var_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
-                var = { var.x + var_accm[j].x,
-                        var.y + var_accm[j].y,
-                        var.z + var_accm[j].z,
-                        var.w + var_accm[j].w};
-                reinterpret_cast<double4*>(var_per_parent)[PARENT_INDEX(parent_ref_index[k])] = var;
-            }
-        }
-    }
-}
 
 std::vector<at::Tensor> nms_var_impl_cuda_forward(
         const at::Tensor &dets,
