@@ -190,13 +190,14 @@ nms_reduce_impl(const int boxes_num,
     *num_to_keep = min(top_k, num_to_keep_);
 }
 
+
 //TODO Add score mean
 template<typename T>
 __global__ void nms_mean_impl(const int64_t parent_object_num,
                               const T *dev_boxes,
                               /*const T* dev_scores,*/
-                              const int64_t *parent_object_index,
-                              const int64_t *parent_object_count,
+                              const int64_t *parent_ref_index,
+                              const int64_t *parent_ref_count,
                               T *mean_per_parent) {
     __shared__ float4 mean_accm[threadsPerBlockLinear];  //local block memory cache
 
@@ -206,7 +207,7 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
         return;
     }
 
-    float inv_N = 1.0f / static_cast<float>(parent_object_count[PARENT_INDEX(parent_object_index[i])]);
+    float inv_N = 1.0f / static_cast<float>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]);
     inv_N = isinf(inv_N) ? 0.0f : inv_N;
 
     // coalesced loads using float4 vector types
@@ -227,12 +228,12 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
                 //FIXME I'm not sure if these really help here or just make things slower. Maybe let the compiler figure this out
-                float4 mean = *reinterpret_cast<float4*>(&mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4]);
+                float4 mean = *reinterpret_cast<float4*>(&mean_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
                 mean = { mean.x + mean_accm[j].x,
                          mean.y + mean_accm[j].y,
                          mean.z + mean_accm[j].z,
                          mean.w + mean_accm[j].w};
-                reinterpret_cast<float4*>(mean_per_parent)[PARENT_INDEX(parent_object_index[k])] = mean;
+                reinterpret_cast<float4*>(mean_per_parent)[PARENT_INDEX(parent_ref_index[k])] = mean;
             }
         }
     }
@@ -242,8 +243,8 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
 template<>
 __global__ void nms_mean_impl<double>(const int64_t parent_object_num,
                                       const double *dev_boxes,
-                                      const int64_t *parent_object_index,
-                                      const int64_t *parent_object_count,
+                                      const int64_t *parent_ref_index,
+                                      const int64_t *parent_ref_count,
                                       double *mean_per_parent) {
     __shared__ double4 mean_accm[threadsPerBlockLinear];  //local block memory cache
 
@@ -253,7 +254,7 @@ __global__ void nms_mean_impl<double>(const int64_t parent_object_num,
         return;
     }
 
-    double inv_N = 1.0 / static_cast<double>(parent_object_count[PARENT_INDEX(parent_object_index[i])]);
+    double inv_N = 1.0 / static_cast<double>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]);
     inv_N = isinf(inv_N) ? 0.0 : inv_N;
 
     const double4 boxes = *reinterpret_cast<const double4 *>(&dev_boxes[i * 4]);
@@ -271,12 +272,12 @@ __global__ void nms_mean_impl<double>(const int64_t parent_object_num,
         for (int j = 0; j < blockDim.x; j++) {
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
-                double4 mean = *reinterpret_cast<double4*>(&mean_per_parent[PARENT_INDEX(parent_object_index[k]) * 4]);
+                double4 mean = *reinterpret_cast<double4*>(&mean_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
                 mean = { mean.x + mean_accm[j].x,
                          mean.y + mean_accm[j].y,
                          mean.z + mean_accm[j].z,
                          mean.w + mean_accm[j].w};
-                reinterpret_cast<double4*>(mean_per_parent)[PARENT_INDEX(parent_object_index[k])] = mean;
+                reinterpret_cast<double4*>(mean_per_parent)[PARENT_INDEX(parent_ref_index[k])] = mean;
             }
         }
     }
@@ -287,8 +288,8 @@ template<typename T>
 __global__ void nms_var_impl(const int64_t parent_object_num,
                              const T *dev_boxes,
                              /*const T* dev_scores,*/
-                             const int64_t *parent_object_index,
-                             const int64_t *parent_object_count,
+                             const int64_t *parent_ref_index,
+                             const int64_t *parent_ref_count,
                              const T *mean_per_parent,
                              T *var_per_parent) {
     __shared__ float4 var_accm[threadsPerBlockLinear];  //local block memory cache
@@ -299,11 +300,11 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
         return;
     }
 
-    float inv_N = 1.0f / (static_cast<float>(parent_object_count[PARENT_INDEX(parent_object_index[i])]) - 1.0f);
+    float inv_N = 1.0f / (static_cast<float>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]) - 1.0f);
     inv_N = isinf(inv_N) ? 0.0f : inv_N;
 
     const float4 boxes = *reinterpret_cast<const float4 *>(&dev_boxes[i * 4]);
-    const float4 mean = *reinterpret_cast<const float4 *>(&mean_per_parent[PARENT_INDEX(parent_object_index[i]) * 4]);
+    const float4 mean = *reinterpret_cast<const float4 *>(&mean_per_parent[PARENT_INDEX(parent_ref_index[i]) * 4]);
     float4 tmp = {mean.x - 0.5f * (boxes.x + boxes.z),
                   mean.y - 0.5f * (boxes.y + boxes.w),
                   mean.z - (boxes.z - boxes.x),
@@ -322,12 +323,12 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
                 //FIXME I'm not sure if these really help here or just make things slower. Maybe let the compiler figure this out
-                float4 var = *reinterpret_cast<float4*>(&var_per_parent[PARENT_INDEX(parent_object_index[k]) * 4]);
+                float4 var = *reinterpret_cast<float4*>(&var_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
                 var = { var.x + var_accm[j].x,
                         var.y + var_accm[j].y,
                         var.z + var_accm[j].z,
                         var.w + var_accm[j].w};
-                reinterpret_cast<float4*>(var_per_parent)[PARENT_INDEX(parent_object_index[k])] = var;
+                reinterpret_cast<float4*>(var_per_parent)[PARENT_INDEX(parent_ref_index[k])] = var;
             }
         }
     }
@@ -336,8 +337,8 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
 template<>
 __global__ void nms_var_impl<double>(const int64_t parent_object_num,
                                      const double *dev_boxes,
-                                     const int64_t *parent_object_index,
-                                     const int64_t *parent_object_count,
+                                     const int64_t *parent_ref_index,
+                                     const int64_t *parent_ref_count,
                                      const double *mean_per_parent,
                                      double *var_per_parent) {
     __shared__ double4 var_accm[threadsPerBlockLinear];  //local block memory cache
@@ -348,11 +349,11 @@ __global__ void nms_var_impl<double>(const int64_t parent_object_num,
         return;
     }
 
-    double inv_N = 1.0 / (static_cast<double>(parent_object_count[PARENT_INDEX(parent_object_index[i])]) - 1.0f);
+    double inv_N = 1.0 / (static_cast<double>(parent_ref_count[PARENT_INDEX(parent_ref_index[i])]) - 1.0f);
     inv_N = isinf(inv_N) ? 0.0 : inv_N;
 
     const double4 boxes = *reinterpret_cast<const double4 *>(&dev_boxes[i * 4]);
-    const double4 mean = *reinterpret_cast<const double4 *>(&mean_per_parent[PARENT_INDEX(parent_object_index[i]) * 4]);
+    const double4 mean = *reinterpret_cast<const double4 *>(&mean_per_parent[PARENT_INDEX(parent_ref_index[i]) * 4]);
     double4 tmp = {mean.x - 0.5 * (boxes.x + boxes.z),
                    mean.y - 0.5 * (boxes.y + boxes.w),
                    mean.z - (boxes.z - boxes.x),
@@ -370,12 +371,12 @@ __global__ void nms_var_impl<double>(const int64_t parent_object_num,
         for (int j = 0; j < blockDim.x; j++) {
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
-                double4 var = *reinterpret_cast<double4*>(&var_per_parent[PARENT_INDEX(parent_object_index[k]) * 4]);
+                double4 var = *reinterpret_cast<double4*>(&var_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
                 var = { var.x + var_accm[j].x,
                         var.y + var_accm[j].y,
                         var.z + var_accm[j].z,
                         var.w + var_accm[j].w};
-                reinterpret_cast<double4*>(var_per_parent)[PARENT_INDEX(parent_object_index[k])] = var;
+                reinterpret_cast<double4*>(var_per_parent)[PARENT_INDEX(parent_ref_index[k])] = var;
             }
         }
     }
@@ -425,8 +426,8 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
     auto longOptions = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kLong);
     auto mask = at::empty({dets_num * col_blocks}, dets.options().dtype(at::kLong));
     auto keep = at::zeros({dets_num}, longOptions);
-    auto parent_object_index = at::zeros({dets_num}, longOptions);
-    auto parent_object_ref_count = at::zeros({dets_num}, longOptions);
+    auto parent_ref_index = at::zeros({dets_num}, longOptions);
+    auto parent_ref_count = at::zeros({dets_num}, longOptions);
     auto num_to_keep = at::empty({}, longOptions);
 
     dim3 blocks(col_blocks, col_blocks);
@@ -444,8 +445,8 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
                               mask.data_ptr<int64_t>(),
                               idx.data_ptr<int64_t>(),
                               keep.data_ptr<int64_t>(),
-                              parent_object_index.data_ptr<int64_t>(),
-                              parent_object_ref_count.data_ptr<int64_t>(),
+                              parent_ref_index.data_ptr<int64_t>(),
+                              parent_ref_count.data_ptr<int64_t>(),
                               num_to_keep.data_ptr<int64_t>());
 
 
@@ -454,22 +455,22 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
                                            torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
     auto parent_object_var = torch::zeros({num_to_keep.item<int>() * 4},
                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
-    blocks = {static_cast<unsigned int>(DIVUP(parent_object_index.size(0), threadsPerBlockLinear)), 1, 1};
+    blocks = {static_cast<unsigned int>(DIVUP(parent_ref_index.size(0), threadsPerBlockLinear)), 1, 1};
     threads = {threadsPerBlockLinear, 1, 1};
 
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_mean_impl", ([&] {
-        nms_mean_impl<scalar_t><<<blocks, threads>>>(parent_object_index.size(0),
+        nms_mean_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
                                                      dets.data_ptr<scalar_t>(),
-                                                     parent_object_index.data_ptr<int64_t>(),
-                                                     parent_object_ref_count.data_ptr<int64_t>(),
+                                                     parent_ref_index.data_ptr<int64_t>(),
+                                                     parent_ref_count.data_ptr<int64_t>(),
                                                      parent_object_mean.data_ptr<scalar_t>());
     }));
 
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "indexed_var", ([&] {
-        nms_var_impl<scalar_t><<<blocks, threads>>>(parent_object_index.size(0),
+        nms_var_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
                                                     dets.data_ptr<scalar_t>(),
-                                                    parent_object_index.data_ptr<int64_t>(),
-                                                    parent_object_ref_count.data_ptr<int64_t>(),
+                                                    parent_ref_index.data_ptr<int64_t>(),
+                                                    parent_ref_count.data_ptr<int64_t>(),
                                                     parent_object_mean.data_ptr<scalar_t>(),
                                                     parent_object_var.data_ptr<scalar_t>());
     }));
