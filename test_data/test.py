@@ -63,7 +63,7 @@ def run_nms(boxes, scores, overlap=.7, top_k=200):
 
     """
     t0 = time.time()
-    keep_custom, var_per_kept_index = nms_with_variance(boxes, scores, overlap=overlap, top_k=top_k)
+    keep_custom, var_per_kept_index, var_per_kept_score = nms_with_variance(boxes, scores, overlap=overlap, top_k=top_k)
     t1 = time.time()
     keep_torch = nms(boxes, scores, overlap)
     t2 = time.time()
@@ -84,7 +84,7 @@ def run_nms(boxes, scores, overlap=.7, top_k=200):
     #delta = torch.sum(keep_custom - keep_torch).cpu().numpy() == 0
     #print("Equal? {}".format(delta))
     print(var_per_kept_index)
-    return keep_custom.cpu().numpy(), keep_torch.cpu().numpy(), var_per_kept_index.cpu().numpy()
+    return keep_custom.cpu().numpy(), keep_torch.cpu().numpy(), var_per_kept_index.cpu().numpy(), var_per_kept_score.cpu().numpy()
 
 
 def main():
@@ -95,7 +95,7 @@ def main():
     vars_xi = np.load(os.path.join(test_dir, 'vars_xi.npy'))[:, :4]
     i = np.load(os.path.join(test_dir, 'i.npy'))
 
-    keep_custom, keep_torch, var = run_nms(boxes, scores)
+    keep_custom, keep_torch, var, var_scores = run_nms(boxes, scores)
 
     res = vars_xi - var[:vars_xi.shape[0], :]
     res *= res
