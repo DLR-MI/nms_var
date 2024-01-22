@@ -50,6 +50,8 @@ __global__ void nms_map_impl(const int64_t n_boxes,
                              const T *dev_boxes,
                              const int64_t *idx,
                              int64_t *dev_mask) {
+    using Tvec = typename std::conditional<std::is_same<T, float>::value, float4, double4>::type;
+
     const int row_start = blockIdx.y;
     const int col_start = blockIdx.x;
 
@@ -62,16 +64,16 @@ __global__ void nms_map_impl(const int64_t n_boxes,
             min(n_boxes - col_start * threadsPerBlock, threadsPerBlock);
 
     // We can coalesce this load into a single float4 or double4
-    __shared__ float4 block_boxes[threadsPerBlock];
+    __shared__ Tvec block_boxes[threadsPerBlock];
     if (threadIdx.x < col_size) {
-        block_boxes[threadIdx.x] = *reinterpret_cast<const float4 *>(&dev_boxes[
+        block_boxes[threadIdx.x] = *reinterpret_cast<const Tvec *>(&dev_boxes[
                 idx[(threadsPerBlock * col_start + threadIdx.x)] * 4]);
     }
     __syncthreads();
 
     if (threadIdx.x < row_size) {
         const int cur_box_idx = threadsPerBlock * row_start + threadIdx.x;
-        const float4 cur_box = *reinterpret_cast<const float4 *>(dev_boxes + idx[cur_box_idx] * 4);
+        const Tvec cur_box = *reinterpret_cast<const Tvec *>(dev_boxes + idx[cur_box_idx] * 4);
         int i = 0;
         unsigned long long t = 0;
         int start = 0;
@@ -79,52 +81,8 @@ __global__ void nms_map_impl(const int64_t n_boxes,
             start = threadIdx.x + 1;
         }
         for (i = start; i < col_size; i++) {
-            if (devIoU<float4, float>(cur_box, block_boxes[i]/* + i * 4*/, nms_overlap_thresh)) {
+            if (devIoU<Tvec, float>(cur_box, block_boxes[i]/* + i * 4*/, nms_overlap_thresh)) {
                 t |= 1ULL << i;
-            }
-        }
-        const int col_blocks = DIVUP(n_boxes, threadsPerBlock);
-        dev_mask[cur_box_idx * col_blocks + col_start] = t;
-    }
-}
-
-template<>
-__global__ void nms_map_impl<double>(const int64_t n_boxes,
-                                     const double nms_overlap_thresh,
-                                     const double *dev_boxes,
-                                     const int64_t *idx,
-                                     int64_t *dev_mask) {
-    const int row_start = blockIdx.y;
-    const int col_start = blockIdx.x;
-
-    if (row_start > col_start)
-        return;
-
-    const int row_size =
-            min(n_boxes - row_start * threadsPerBlock, threadsPerBlock);
-    const int col_size =
-            min(n_boxes - col_start * threadsPerBlock, threadsPerBlock);
-
-    // We can coalesce this load into a single float4 or double4
-    __shared__ double4 block_boxes[threadsPerBlock];
-    if (threadIdx.x < col_size) {
-        block_boxes[threadIdx.x] = *reinterpret_cast<const double4 *>(&dev_boxes[
-                idx[(threadsPerBlock * col_start + threadIdx.x)] * 4]);
-    }
-    __syncthreads();
-
-    if (threadIdx.x < row_size) {
-        const int cur_box_idx = threadsPerBlock * row_start + threadIdx.x;
-        const double4 cur_box = *reinterpret_cast<const double4 *>(dev_boxes + idx[cur_box_idx] * 4);
-        int i = 0;
-        unsigned long long t = 0;
-        int start = 0;
-        if (row_start == col_start) {
-            start = threadIdx.x + 1;
-        }
-        for (i = start; i < col_size; i++) {
-            if (devIoU<double4, double>(cur_box, block_boxes[i]/* + i * 4*/, nms_overlap_thresh)) {
-                t |= 1ULL << i; // cap to 64 for debugging
             }
         }
         const int col_blocks = DIVUP(n_boxes, threadsPerBlock);
@@ -195,12 +153,15 @@ nms_reduce_impl(const int boxes_num,
 template<typename T>
 __global__ void nms_mean_impl(const int64_t parent_object_num,
                               const T *dev_boxes,
+                              const T *dev_scores,
                               const int64_t *parent_ref_index,
                               const int64_t *parent_ref_count,
-                              T *mean_per_parent) {
+                              T *mean_boxes,
+                              T *mean_scores) {
     using Tvec = typename std::conditional<std::is_same<T, float>::value, float4, double4>::type;
 
-    __shared__ Tvec mean_accm[threadsPerBlockLinear];  //local block memory cache
+    __shared__ Tvec mean_boxes_accm[threadsPerBlockLinear];  //local block memory cache
+    __shared__ T mean_scores_accm[threadsPerBlockLinear];
 
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -214,12 +175,13 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
     // coalesced loads using float4 vector types
     //FIXME we can try a stride of 5 to include the scores here
     const auto boxes = *reinterpret_cast<const Tvec *>(&dev_boxes[i * 4]);
-    mean_accm[threadIdx.x] = {
+    mean_boxes_accm[threadIdx.x] = {
             static_cast<T>(0.5) * (boxes.x + boxes.z) * inv_N,
             static_cast<T>(0.5) * (boxes.y + boxes.w) * inv_N,
             (boxes.z - boxes.x) * inv_N,
             (boxes.w - boxes.y) * inv_N
     };
+    mean_scores_accm[threadIdx.x] = dev_scores[i] * inv_N;
 
     __syncthreads();
 
@@ -229,14 +191,14 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
         for (int j = 0; j < blockDim.x; j++) {
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
-                //FIXME I'm not sure if these really help here or just make things slower. Maybe let the compiler figure this out
                 //TODO include stride of 5 to include the score as a float
-                auto mean = *reinterpret_cast<Tvec *>(&mean_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
-                mean = {mean.x + mean_accm[j].x,
-                        mean.y + mean_accm[j].y,
-                        mean.z + mean_accm[j].z,
-                        mean.w + mean_accm[j].w};
-                reinterpret_cast<Tvec *>(mean_per_parent)[PARENT_INDEX(parent_ref_index[k])] = mean;
+                auto mean = *reinterpret_cast<Tvec *>(&mean_boxes[PARENT_INDEX(parent_ref_index[k]) * 4]);
+                mean = {mean.x + mean_boxes_accm[j].x,
+                        mean.y + mean_boxes_accm[j].y,
+                        mean.z + mean_boxes_accm[j].z,
+                        mean.w + mean_boxes_accm[j].w};
+                reinterpret_cast<Tvec *>(mean_boxes)[PARENT_INDEX(parent_ref_index[k])] = mean;
+                mean_scores[PARENT_INDEX(parent_ref_index[k])] += mean_scores_accm[j];
             }
         }
     }
@@ -247,13 +209,17 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
 template<typename T>
 __global__ void nms_var_impl(const int64_t parent_object_num,
                              const T *dev_boxes,
+                             const T *dev_scores,
                              const int64_t *parent_ref_index,
                              const int64_t *parent_ref_count,
-                             const T *mean_per_parent,
-                             T *var_per_parent) {
+                             const T *mean_boxes,
+                             const T *mean_scores,
+                             T *var_boxes,
+                             T *var_scores) {
     using Tvec = typename std::conditional<std::is_same<T, float>::value, float4, double4>::type;
 
-    __shared__ Tvec var_accm[threadsPerBlockLinear];  //local block memory cache
+    __shared__ Tvec var_boxes_accm[threadsPerBlockLinear];  //local block memory cache
+    __shared__ T var_scores_accm[threadsPerBlockLinear];
 
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -265,16 +231,17 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
     inv_N = isinf(inv_N) ? 0.0f : inv_N;
 
     const auto boxes = *reinterpret_cast<const Tvec *>(&dev_boxes[i * 4]);
-    const auto mean = *reinterpret_cast<const Tvec *>(&mean_per_parent[PARENT_INDEX(parent_ref_index[i]) * 4]);
+    const auto mean = *reinterpret_cast<const Tvec *>(&mean_boxes[PARENT_INDEX(parent_ref_index[i]) * 4]);
     Tvec tmp = {mean.x - static_cast<T>(0.5) * (boxes.x + boxes.z),
                 mean.y - static_cast<T>(0.5) * (boxes.y + boxes.w),
                 mean.z - (boxes.z - boxes.x),
                 mean.w - (boxes.w - boxes.y)};
 
-    var_accm[threadIdx.x] = {tmp.x * tmp.x * inv_N,
+    var_boxes_accm[threadIdx.x] = {tmp.x * tmp.x * inv_N,
                              tmp.y * tmp.y * inv_N,
                              tmp.z * tmp.z * inv_N,
                              tmp.w * tmp.w * inv_N};
+    var_scores_accm[threadIdx.x] = mean_scores[PARENT_INDEX(parent_ref_index[i])] - dev_scores[i];
 
     __syncthreads();
 
@@ -284,12 +251,13 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
                 //FIXME I'm not sure if these really help here or just make things slower. Maybe let the compiler figure this out
-                auto var = *reinterpret_cast<Tvec *>(&var_per_parent[PARENT_INDEX(parent_ref_index[k]) * 4]);
-                var = {var.x + var_accm[j].x,
-                       var.y + var_accm[j].y,
-                       var.z + var_accm[j].z,
-                       var.w + var_accm[j].w};
-                reinterpret_cast<Tvec *>(var_per_parent)[PARENT_INDEX(parent_ref_index[k])] = var;
+                auto var = *reinterpret_cast<Tvec *>(&var_boxes[PARENT_INDEX(parent_ref_index[k]) * 4]);
+                var = {var.x + var_boxes_accm[j].x,
+                       var.y + var_boxes_accm[j].y,
+                       var.z + var_boxes_accm[j].z,
+                       var.w + var_boxes_accm[j].w};
+                reinterpret_cast<Tvec *>(var_boxes)[PARENT_INDEX(parent_ref_index[k])] = var;
+                var_scores[PARENT_INDEX(parent_ref_index[k])] += var_scores_accm[j];
             }
         }
     }
@@ -367,28 +335,39 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
     // Reshape this to a [num_to_keep, 4] tensor
     auto parent_object_mean = torch::zeros({num_to_keep.item<int>() * 4},
                                            torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+    auto parent_scores_mean = torch::zeros({num_to_keep.item<int>(), 1},
+                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
     auto parent_object_var = torch::zeros({num_to_keep.item<int>() * 4},
                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+    auto parent_scores_var = torch::zeros({num_to_keep.item<int>(), 1},
+                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
     blocks = {static_cast<unsigned int>(DIVUP(parent_ref_index.size(0), threadsPerBlockLinear)), 1, 1};
     threads = {threadsPerBlockLinear, 1, 1};
 
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_mean_impl", ([&] {
         nms_mean_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
                                                      dets.data_ptr<scalar_t>(),
+                                                     scores.data_ptr<scalar_t>(),
                                                      parent_ref_index.data_ptr<int64_t>(),
                                                      parent_ref_count.data_ptr<int64_t>(),
-                                                     parent_object_mean.data_ptr<scalar_t>());
+                                                     parent_object_mean.data_ptr<scalar_t>(),
+                                                     parent_scores_mean.data_ptr<scalar_t>());
     }));
 
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "indexed_var", ([&] {
         nms_var_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
                                                     dets.data_ptr<scalar_t>(),
+                                                    scores.data_ptr<scalar_t>(),
                                                     parent_ref_index.data_ptr<int64_t>(),
                                                     parent_ref_count.data_ptr<int64_t>(),
                                                     parent_object_mean.data_ptr<scalar_t>(),
-                                                    parent_object_var.data_ptr<scalar_t>());
+                                                    parent_scores_mean.data_ptr<scalar_t>(),
+                                                    parent_object_var.data_ptr<scalar_t>(),
+                                                    parent_scores_mean.data_ptr<scalar_t>());
     }));
 
-    return {keep.slice(0, 0, num_to_keep.item<int>()), parent_object_var.view({num_to_keep.item<int>(), 4})};
+    return {keep.slice(0, 0, num_to_keep.item<int>()),
+            parent_object_var.view({num_to_keep.item<int>(), 4}),
+            parent_scores_var.view({num_to_keep.item<int>(), 1})};
 }
 
