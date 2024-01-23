@@ -83,24 +83,30 @@ def run_nms(boxes, scores, overlap=.7, top_k=200):
     print("Torchvision approach took: {} ms".format((t2 - t1) * 1000))
     #delta = torch.sum(keep_custom - keep_torch).cpu().numpy() == 0
     #print("Equal? {}".format(delta))
-    print(var_per_kept_index)
     return keep_custom.cpu().numpy(), keep_torch.cpu().numpy(), var_per_kept_index.cpu().numpy(), var_per_kept_score.cpu().numpy()
 
 
 def main():
-    test_dir = 'test_data/nms_dummy_new'
+    test_dir = 'nms_dummy_new'
     device = torch.device('cuda:0')
     boxes = torch.from_numpy(np.load(os.path.join(test_dir, 'boxes.npy'))).float().to(device=device)
     scores = torch.from_numpy(np.load(os.path.join(test_dir, 'scores.npy'))).float().to(device=device)
-    vars_xi = np.load(os.path.join(test_dir, 'vars_xi.npy'))[:, :4]
+    vars_xi = np.load(os.path.join(test_dir, 'vars_xi.npy'))
     i = np.load(os.path.join(test_dir, 'i.npy'))
 
     keep_custom, keep_torch, var, var_scores = run_nms(boxes, scores)
 
-    res = vars_xi - var[:vars_xi.shape[0], :]
+    res = vars_xi[:, :4] - var[:vars_xi.shape[0], :]
     res *= res
     res = np.sqrt(res)
     print("RMS of variance cuda: {}".format(np.mean(res, axis=0)))
+
+    print(var_scores)
+    res = vars_xi[:, 4] - var_scores
+    res *= res
+    res = np.sqrt(res)
+    print(vars_xi[:, 4].reshape(-1, 1) - var_scores)
+    print("RMS of variance scores cuda: {}".format(np.mean(res)))
 
     check_set(i, keep_custom)
 

@@ -241,7 +241,7 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
                              tmp.y * tmp.y * inv_N,
                              tmp.z * tmp.z * inv_N,
                              tmp.w * tmp.w * inv_N};
-    var_scores_accm[threadIdx.x] = mean_scores[PARENT_INDEX(parent_ref_index[i])] - dev_scores[i];
+    var_scores_accm[threadIdx.x] = (mean_scores[PARENT_INDEX(parent_ref_index[i])] - dev_scores[i]) * inv_N;
 
     __syncthreads();
 
@@ -363,7 +363,7 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
                                                     parent_object_mean.data_ptr<scalar_t>(),
                                                     parent_scores_mean.data_ptr<scalar_t>(),
                                                     parent_object_var.data_ptr<scalar_t>(),
-                                                    parent_scores_mean.data_ptr<scalar_t>());
+                                                    parent_scores_var.data_ptr<scalar_t>());
     }));
 
     return {keep.slice(0, 0, num_to_keep.item<int>()),
