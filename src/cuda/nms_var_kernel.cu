@@ -241,7 +241,7 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
                              tmp.y * tmp.y * inv_N,
                              tmp.z * tmp.z * inv_N,
                              tmp.w * tmp.w * inv_N};
-    const T tmp_delta = (mean_scores[i_id] - dev_scores[i]);
+    const T tmp_delta = mean_scores[i_id] - dev_scores[i];
     var_scores_accm[threadIdx.x] = tmp_delta * tmp_delta * inv_N;
 
     __syncthreads();
@@ -334,7 +334,7 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
     // Reshape this to a [num_to_keep, 4] tensor
     auto parent_object_mean = torch::zeros({num_to_keep.item<int>() * 4},
                                            torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
-    auto parent_scores_mean = torch::zeros({num_to_keep.item<int>(), 1},
+    auto parent_scores_mean = torch::zeros({num_to_keep.item<int>() * 1},
                                            torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
     auto parent_object_var = torch::zeros({num_to_keep.item<int>() * 5},
                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
