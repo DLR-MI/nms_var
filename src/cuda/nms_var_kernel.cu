@@ -173,7 +173,6 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
     inv_N = isinf(inv_N) ? 0.0 : inv_N;
 
     // coalesced loads using float4 vector types
-    //FIXME we can try a stride of 5 to include the scores here
     const auto boxes = *reinterpret_cast<const Tvec *>(&dev_boxes[i * 4]);
     mean_boxes_accm[threadIdx.x] = {
             static_cast<T>(0.5) * (boxes.x + boxes.z) * inv_N,
@@ -191,14 +190,14 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
         for (int j = 0; j < blockDim.x; j++) {
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
-                //TODO include stride of 5 to include the score as a float
-                auto mean = *reinterpret_cast<Tvec *>(&mean_boxes[PARENT_INDEX(parent_ref_index[k]) * 4]);
+                const int k_id = PARENT_INDEX(parent_ref_index[k]);
+                auto mean = *reinterpret_cast<Tvec *>(&mean_boxes[k_id * 4]);
                 mean = {mean.x + mean_boxes_accm[j].x,
                         mean.y + mean_boxes_accm[j].y,
                         mean.z + mean_boxes_accm[j].z,
                         mean.w + mean_boxes_accm[j].w};
-                reinterpret_cast<Tvec *>(mean_boxes)[PARENT_INDEX(parent_ref_index[k])] = mean;
-                mean_scores[PARENT_INDEX(parent_ref_index[k])] += mean_scores_accm[j];
+                reinterpret_cast<Tvec *>(mean_boxes)[k_id] = mean;
+                mean_scores[k_id] += mean_scores_accm[j];
             }
         }
     }
@@ -242,7 +241,8 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
                              tmp.y * tmp.y * inv_N,
                              tmp.z * tmp.z * inv_N,
                              tmp.w * tmp.w * inv_N};
-    var_scores_accm[threadIdx.x] = (mean_scores[i_id] - dev_scores[i]) * inv_N;
+    const T tmp_delta = (mean_scores[i_id] - dev_scores[i]);
+    var_scores_accm[threadIdx.x] = tmp_delta * tmp_delta * inv_N;
 
     __syncthreads();
 
