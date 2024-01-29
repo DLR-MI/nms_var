@@ -22,7 +22,7 @@ https://github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cuda/nms_kernel
 #define MAX_COL_BLOCKS 1000
 
 #define DIVUP(m, n) (((m)+(n)-1) / (n))
-#define PARENT_INDEX(x) ((x) - 1)
+#define PARENT_INDEX(x) (max(0, (x) - 1))
 
 int64_t const threadsPerBlock = sizeof(unsigned long long) * 8;
 int64_t const threadsPerBlockLinear = 256;
