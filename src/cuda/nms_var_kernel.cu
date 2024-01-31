@@ -311,12 +311,6 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
     dim3 blocks(col_blocks, col_blocks);
     dim3 threads(threadsPerBlock);
 
-    auto scores_print = scores.to(torch::kCPU);
-    std::cout << "Size of scores: " << scores_print.size(0) << std::endl;
-    for(int i = 0; i < scores_print.size(0); i++) {
-        std::cout << "score " << i << "): " << scores_print.index({i}) << std::endl;
-    }
-
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_cuda_forward", ([&] {
         nms_map_impl<scalar_t><<<blocks, threads>>>(dets_num,
                                                     (scalar_t) nms_overlap_thresh,
@@ -344,6 +338,10 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
     blocks = {static_cast<unsigned int>(DIVUP(parent_ref_index.size(0), threadsPerBlockLinear)), 1, 1};
     threads = {threadsPerBlockLinear, 1, 1};
 
+    std::cout << "Parent ref index size: " << parent_ref_index.size(0) << std::endl;
+    std::cout << "CUDA block size: (" << blocks.x << ", " << blocks.y << ", " << blocks.z << ")" << std::endl;
+    std::cout << "Num detections: " << dets_num << std::endl;
+
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_mean_impl", ([&] {
         nms_mean_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
                                                      dets.data_ptr<scalar_t>(),
@@ -353,6 +351,12 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
                                                      parent_object_mean.data_ptr<scalar_t>(),
                                                      parent_scores_mean.data_ptr<scalar_t>());
     }));
+
+    auto scores_print = parent_scores_mean.to(torch::kCPU);
+    std::cout << "Size of mean scores: " << scores_print.size(0) << std::endl;
+    for(int i = 0; i < scores_print.size(0); i++) {
+        std::cout << "mean score " << i << "): " << scores_print.index({i}) << std::endl;
+    }
 
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_var_impl", ([&] {
         nms_var_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
