@@ -87,7 +87,7 @@ def run_nms(boxes, scores, overlap=.7, top_k=200):
 
 
 def main():
-    test_dir = 'nms_arrays'
+    test_dir = 'nms_dummy_new'
     device = torch.device('cuda:0')
     boxes = torch.from_numpy(np.load(os.path.join(test_dir, 'boxes.npy'))).float().to(device=device)
     scores = torch.from_numpy(np.load(os.path.join(test_dir, 'scores.npy'))).float().to(device=device)

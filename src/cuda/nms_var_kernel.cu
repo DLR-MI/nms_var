@@ -19,7 +19,7 @@ https://github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cuda/nms_kernel
 #define MAX_COL_BLOCKS 1000
 
 #define DIVUP(m, n) (((m)+(n)-1) / (n))
-#define PARENT_INDEX(x) (max(static_cast<int>(0), static_cast<int>(x - 1)))
+#define PARENT_INDEX(x) (x - 1)
 
 int64_t const threadsPerBlock = sizeof(unsigned long long) * 8;
 int64_t const threadsPerBlockLinear = 256;
@@ -146,7 +146,6 @@ nms_reduce_impl(const int boxes_num,
 }
 
 
-//TODO Add score mean
 template<typename T>
 __global__ void nms_mean_impl(const int64_t parent_object_num,
                               const T *dev_boxes,
@@ -201,7 +200,6 @@ __global__ void nms_mean_impl(const int64_t parent_object_num,
 }
 
 
-//TODO Add score variance
 template<typename T>
 __global__ void nms_var_impl(const int64_t parent_object_num,
                              const T *dev_boxes,
@@ -235,9 +233,9 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
                 mean.w - (boxes.w - boxes.y)};
 
     var_boxes_accm[threadIdx.x] = {tmp.x * tmp.x * inv_N,
-                             tmp.y * tmp.y * inv_N,
-                             tmp.z * tmp.z * inv_N,
-                             tmp.w * tmp.w * inv_N};
+                                   tmp.y * tmp.y * inv_N,
+                                   tmp.z * tmp.z * inv_N,
+                                   tmp.w * tmp.w * inv_N};
     const T tmp_delta = mean_scores[i_id] - dev_scores[i];
     var_scores_accm[threadIdx.x] = tmp_delta * tmp_delta * inv_N;
 
@@ -256,6 +254,90 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
                 variances[k_id + 4] += var_scores_accm[j];
             }
         }
+    }
+}
+
+template<typename T>
+struct vec4 {
+    T x;
+    T y;
+    T z;
+    T w;
+};
+
+template<typename T>
+void nms_mean_impl_cpu(const int64_t parent_object_num,
+                       const T *h_boxes,
+                       const T *h_scores,
+                       const int64_t *parent_ref_index,
+                       const int64_t *parent_ref_count,
+                       T *mean_boxes,
+                       T *mean_scores) {
+
+    for (int i = 0; i < parent_object_num; i++) {
+        const int i_id = PARENT_INDEX(parent_ref_index[i]);
+
+        T inv_N = static_cast<T>(1.0) / static_cast<float>(parent_ref_count[i_id]);
+        inv_N = isinf(inv_N) ? 0.0 : inv_N;
+
+
+        // coalesced loads using float4 vector types
+        const auto boxes = *reinterpret_cast<const vec4<T> *>(&h_boxes[i * 4]);
+        const vec4<T> mean_box = {
+                static_cast<T>(0.5) * (boxes.x + boxes.z) * inv_N,
+                static_cast<T>(0.5) * (boxes.y + boxes.w) * inv_N,
+                (boxes.z - boxes.x) * inv_N,
+                (boxes.w - boxes.y) * inv_N
+        };
+        const T mean_score = h_scores[i] * inv_N;
+
+        auto mean = *reinterpret_cast<vec4<T> *>(&mean_boxes[i_id * 4]);
+        mean = {mean.x + mean_box.x,
+                mean.y + mean_box.y,
+                mean.z + mean_box.z,
+                mean.w + mean_box.w};
+        reinterpret_cast<vec4<T> *>(mean_boxes)[i_id] = mean;
+        mean_scores[i_id] += mean_score;
+    }
+}
+
+
+template<typename T>
+void nms_var_impl_cpu(const int64_t parent_object_num,
+                      const T *h_boxes,
+                      const T *h_scores,
+                      const int64_t *parent_ref_index,
+                      const int64_t *parent_ref_count,
+                      const T *mean_boxes,
+                      const T *mean_scores,
+                      T *variances) {
+    for (int i = 0; i < parent_object_num; i++) {
+        int i_id = PARENT_INDEX(parent_ref_index[i]);
+
+        T inv_N = 1.0 / (static_cast<float>(parent_ref_count[i_id]) - 1.0);
+        inv_N = isinf(inv_N) ? 0.0f : inv_N;
+
+        const auto boxes = *reinterpret_cast<const vec4<T> *>(&h_boxes[i * 4]);
+        const auto mean = *reinterpret_cast<const vec4<T> *>(&mean_boxes[i_id * 4]);
+        const vec4<T> tmp = {mean.x - static_cast<T>(0.5) * (boxes.x + boxes.z),
+                             mean.y - static_cast<T>(0.5) * (boxes.y + boxes.w),
+                             mean.z - (boxes.z - boxes.x),
+                             mean.w - (boxes.w - boxes.y)};
+
+        const vec4<T> var_box = {tmp.x * tmp.x * inv_N,
+                                 tmp.y * tmp.y * inv_N,
+                                 tmp.z * tmp.z * inv_N,
+                                 tmp.w * tmp.w * inv_N};
+        const T tmp_delta = mean_scores[i_id] - h_scores[i];
+        const T var_score = tmp_delta * tmp_delta * inv_N;
+
+        i_id *= 5;
+
+        variances[i_id + 0] += var_box.x;
+        variances[i_id + 1] += var_box.y;
+        variances[i_id + 2] += var_box.z;
+        variances[i_id + 3] += var_box.w;
+        variances[i_id + 4] += var_score;
     }
 }
 
@@ -330,11 +412,35 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
 
     // Reshape this to a [num_to_keep, 4] tensor
     auto parent_object_mean = torch::zeros({num_to_keep.item<int>() * 4},
-                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+                                           torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat));
     auto parent_scores_mean = torch::zeros({num_to_keep.item<int>() * 1},
-                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+                                           torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat));
     auto parent_object_var = torch::zeros({num_to_keep.item<int>() * 5},
-                                          torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+                                          torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat));
+
+    auto h_dets = dets.to(torch::kCPU);
+    auto h_scores = scores.to(torch::kCPU);
+    auto h_parent_ref_index = parent_ref_index.to(torch::kCPU);
+    auto h_parent_ref_count = parent_ref_count.to(torch::kCPU);
+
+    nms_mean_impl_cpu(parent_ref_index.size(0),
+                      h_dets.data_ptr<float>(),
+                      h_scores.data_ptr<float>(),
+                      h_parent_ref_index.data_ptr<int64_t>(),
+                      h_parent_ref_count.data_ptr<int64_t>(),
+                      parent_object_mean.data_ptr<float>(),
+                      parent_scores_mean.data_ptr<float>());
+
+    nms_var_impl_cpu(parent_ref_index.size(0),
+                     h_dets.data_ptr<float>(),
+                     h_scores.data_ptr<float>(),
+                     h_parent_ref_index.data_ptr<int64_t>(),
+                     h_parent_ref_count.data_ptr<int64_t>(),
+                     parent_object_mean.data_ptr<float>(),
+                     parent_scores_mean.data_ptr<float>(),
+                     parent_object_var.data_ptr<float>());
+
+    /*
     blocks = {static_cast<unsigned int>(DIVUP(parent_ref_index.size(0), threadsPerBlockLinear)), 1, 1};
     threads = {threadsPerBlockLinear, 1, 1};
 
@@ -357,9 +463,9 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
                                                     parent_object_mean.data_ptr<scalar_t>(),
                                                     parent_scores_mean.data_ptr<scalar_t>(),
                                                     parent_object_var.data_ptr<scalar_t>());
-    }));
+    }));*/
 
     return {keep.slice(0, 0, num_to_keep.item<int>()),
-            parent_object_var.view({num_to_keep.item<int>(), 5})};
+            parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA)};
 }
 
