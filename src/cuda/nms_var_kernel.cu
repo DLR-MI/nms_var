@@ -216,6 +216,12 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
     __shared__ Tvec var_boxes_accm[threadsPerBlockLinear];  //local block memory cache
     __shared__ T var_scores_accm[threadsPerBlockLinear];
 
+    // DEBUG ONLY
+    __shared__ T mean_score_accm[threadsPerBlockLinear];
+    __shared__ T dev_score_accm[threadsPerBlockLinear];
+    __shared__ T delta_score_accm[threadsPerBlockLinear];
+    __shared__ T norm_fac_accm[threadsPerBlockLinear];
+
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
 
     if (i >= parent_object_num) {
@@ -241,6 +247,12 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
     const T tmp_delta = mean_scores[i_id] - dev_scores[i];
     var_scores_accm[threadIdx.x] = tmp_delta * tmp_delta * inv_N;
 
+    // DEBUG ONLY
+    mean_score_accm[threadIdx.x] = mean_scores[i_id];
+    dev_score_accm[threadIdx.x] = dev_scores[i];
+    delta_score_accm[threadIdx.x] = tmp_delta;
+    norm_fac_accm[threadIdx.x] = inv_N;
+
     __syncthreads();
 
     // write (this is done by one thread)
@@ -249,12 +261,11 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
                 const int k_id = PARENT_INDEX(parent_ref_index[k]) * 5;
-                variances[k_id + 0] += var_scores_accm[j];
-                variances[k_id + 1] += var_boxes_accm[j].x;
-                variances[k_id + 2] += var_boxes_accm[j].y;
-                variances[k_id + 3] += var_boxes_accm[j].z;
-                variances[k_id + 4] += var_boxes_accm[j].w;
-                //variances[k_id + 4] += var_scores_accm[j];
+                variances[k_id + 0] += var_scores_accm[j];//var_boxes_accm[j].x;
+                variances[k_id + 1] += mean_score_accm[j];//var_boxes_accm[j].y;
+                variances[k_id + 2] += dev_score_accm[j];//var_boxes_accm[j].z;
+                variances[k_id + 3] += delta_score_accm[j];//var_boxes_accm[j].w;
+                variances[k_id + 4] += norm_fac_accm[j];//var_scores_accm[j];
             }
         }
     }
