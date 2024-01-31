@@ -96,6 +96,8 @@ def main():
 
     keep_custom, keep_torch, var = run_nms(boxes, scores)
 
+    print(var[:, 4])
+
     res = vars_xi - var
     res *= res
     res = np.sqrt(res)

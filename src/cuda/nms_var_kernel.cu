@@ -4,11 +4,8 @@
 #include <ATen/AccumulateType.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#include <cuda.h>
 #include <cuda_runtime.h>
 #include <vector>
-#include <iostream>
-#include <cmath>
 
 /* Based on the official PyTorch implementation of NMS using CUDA from:
 https://github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cuda/nms_kernel.cu
@@ -252,11 +249,12 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
             const int k = j + blockIdx.x * blockDim.x;
             if (k < parent_object_num) {
                 const int k_id = PARENT_INDEX(parent_ref_index[k]) * 5;
-                variances[k_id + 0] += var_boxes_accm[j].x;
-                variances[k_id + 1] += var_boxes_accm[j].y;
-                variances[k_id + 2] += var_boxes_accm[j].z;
-                variances[k_id + 3] += var_boxes_accm[j].w;
-                variances[k_id + 4] += var_scores_accm[j];
+                variances[k_id + 0] += var_scores_accm[j];
+                variances[k_id + 1] += var_boxes_accm[j].x;
+                variances[k_id + 2] += var_boxes_accm[j].y;
+                variances[k_id + 3] += var_boxes_accm[j].z;
+                variances[k_id + 4] += var_boxes_accm[j].w;
+                //variances[k_id + 4] += var_scores_accm[j];
             }
         }
     }
@@ -351,7 +349,7 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
                                                      parent_scores_mean.data_ptr<scalar_t>());
     }));
 
-    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "indexed_var", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_var_impl", ([&] {
         nms_var_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
                                                     dets.data_ptr<scalar_t>(),
                                                     scores.data_ptr<scalar_t>(),
