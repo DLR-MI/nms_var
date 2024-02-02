@@ -10,7 +10,7 @@
 /* Based on the official PyTorch implementation of NMS using CUDA from:
 https://github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cuda/nms_kernel.cu
  * Official code was changed by Felix Sattler 2023 to include:
- * - Mean and variance calculations for every kept bounding boxes over all overlapping candidates
+ * - Mean and variance calculations for every kept bounding boxes & scores over all overlapping candidates
  * - Coalesced memory accesses for the nms map kernel in CUDA & minor tweaks
  * - Modifications to compute the number of overlapping candidates per kept bounding box index
 */
@@ -24,10 +24,6 @@ https://github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cuda/nms_kernel
 int64_t const threadsPerBlock = sizeof(unsigned long long) * 8;
 int64_t const threadsPerBlockLinear = 256;
 
-
-//FIXME Check if pivot is included in mean and variance, check the normalization factor
-//FIXME Investigate the bias in IoU computation to get at least one pixel coverage
-//TODO Add variance over candidate scores
 
 template<typename T, typename Ts>
 __device__ inline bool devIoU(const T &a, const T &b, const float threshold) {
@@ -146,6 +142,10 @@ nms_reduce_impl(const int boxes_num,
 }
 
 
+// We observed a bug on CUDA version 12.1 where the computation using __syncthreads() and only one thread to accumulate
+// would not work anymore. On CUDA version 11.7 we successfully ran this code with no issues.
+// Therefore, we currently provide a CPU implementation
+#ifdef COMPUTE_MEAN_VAR_GPU
 template<typename T>
 __global__ void nms_mean_impl(const int64_t parent_object_num,
                               const T *dev_boxes,
@@ -256,6 +256,7 @@ __global__ void nms_var_impl(const int64_t parent_object_num,
         }
     }
 }
+#else
 
 template<typename T>
 struct vec4 {
@@ -341,6 +342,7 @@ void nms_var_impl_cpu(const int64_t parent_object_num,
     }
 }
 
+#endif
 
 std::vector<at::Tensor> nms_var_impl_cuda_forward(
         const at::Tensor &dets,
@@ -409,6 +411,40 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
                               parent_ref_count.data_ptr<int64_t>(),
                               num_to_keep.data_ptr<int64_t>());
 
+#ifdef COMPUTE_MEAN_VAR_GPU
+    // Reshape this to a [num_to_keep, 4] tensor
+    auto parent_object_mean = torch::zeros({num_to_keep.item<int>() * 4},
+                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+    auto parent_scores_mean = torch::zeros({num_to_keep.item<int>() * 1},
+                                           torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+    auto parent_object_var = torch::zeros({num_to_keep.item<int>() * 5},
+                                          torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+
+
+    blocks = {static_cast<unsigned int>(DIVUP(parent_ref_index.size(0), threadsPerBlockLinear)), 1, 1};
+    threads = {threadsPerBlockLinear, 1, 1};
+
+    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_mean_impl", ([&] {
+        nms_mean_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
+                                                     dets.data_ptr<scalar_t>(),
+                                                     scores.data_ptr<scalar_t>(),
+                                                     parent_ref_index.data_ptr<int64_t>(),
+                                                     parent_ref_count.data_ptr<int64_t>(),
+                                                     parent_object_mean.data_ptr<scalar_t>(),
+                                                     parent_scores_mean.data_ptr<scalar_t>());
+    }));
+
+    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_var_impl", ([&] {
+        nms_var_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
+                                                    dets.data_ptr<scalar_t>(),
+                                                    scores.data_ptr<scalar_t>(),
+                                                    parent_ref_index.data_ptr<int64_t>(),
+                                                    parent_ref_count.data_ptr<int64_t>(),
+                                                    parent_object_mean.data_ptr<scalar_t>(),
+                                                    parent_scores_mean.data_ptr<scalar_t>(),
+                                                    parent_object_var.data_ptr<scalar_t>());
+    }));
+#else
 
     // Reshape this to a [num_to_keep, 4] tensor
     auto parent_object_mean = torch::zeros({num_to_keep.item<int>() * 4},
@@ -440,30 +476,7 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
                      parent_scores_mean.data_ptr<float>(),
                      parent_object_var.data_ptr<float>());
 
-    /*
-    blocks = {static_cast<unsigned int>(DIVUP(parent_ref_index.size(0), threadsPerBlockLinear)), 1, 1};
-    threads = {threadsPerBlockLinear, 1, 1};
-
-    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_mean_impl", ([&] {
-        nms_mean_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
-                                                     dets.data_ptr<scalar_t>(),
-                                                     scores.data_ptr<scalar_t>(),
-                                                     parent_ref_index.data_ptr<int64_t>(),
-                                                     parent_ref_count.data_ptr<int64_t>(),
-                                                     parent_object_mean.data_ptr<scalar_t>(),
-                                                     parent_scores_mean.data_ptr<scalar_t>());
-    }));
-
-    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_var_impl", ([&] {
-        nms_var_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
-                                                    dets.data_ptr<scalar_t>(),
-                                                    scores.data_ptr<scalar_t>(),
-                                                    parent_ref_index.data_ptr<int64_t>(),
-                                                    parent_ref_count.data_ptr<int64_t>(),
-                                                    parent_object_mean.data_ptr<scalar_t>(),
-                                                    parent_scores_mean.data_ptr<scalar_t>(),
-                                                    parent_object_var.data_ptr<scalar_t>());
-    }));*/
+#endif
 
     return {keep.slice(0, 0, num_to_keep.item<int>()),
             parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA)};

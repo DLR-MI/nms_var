@@ -5,7 +5,7 @@ find_package(PythonLibs REQUIRED)
 find_package(Torch REQUIRED PATHS $ENV{HOME}/libtorch)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
-add_library(nms_variance_cu STATIC src/cuda/nms_var_kernel.cu)
+add_library(nms_variance_cu STATIC src/nms_with_variance/cuda/nms_var_kernel.cu)
 target_include_directories(nms_variance_cu PRIVATE "${TORCH_INCLUDE_DIRS}" ${PYTHON_INCLUDE_DIRS})
 target_link_libraries(nms_variance_cu ${PYTHON_LIBRARIES})
 set_property(TARGET nms_variance_cu PROPERTY CUDA_SEPARABLE_COMPILATION ON)
@@ -13,7 +13,7 @@ set_property(TARGET nms_variance_cu PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(extern/pybind11)
 
-pybind11_add_module(pytorch_nms_variance src/nms.cpp)
+pybind11_add_module(pytorch_nms_variance src/nms_with_variance/nms.cpp)
 target_link_libraries(pytorch_nms_variance PRIVATE "${TORCH_LIBRARIES}" nms_variance_cu)
 set_property(TARGET pytorch_nms_variance PROPERTY CXX_STANDARD 17)
 

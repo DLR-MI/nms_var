@@ -1,12 +1,6 @@
 #include <torch/extension.h>
 #include <torch/types.h>
-/*
-std::vector<at::Tensor> nms_impl_cpu_forward(
-        at::Tensor &dets,
-        at::Tensor &scores,
-        float nms_overlap_thresh,
-        unsigned long top_k);
-*/
+
 std::vector<at::Tensor> nms_var_impl_cuda_forward(
         const at::Tensor &dets,
         const at::Tensor &scores,
