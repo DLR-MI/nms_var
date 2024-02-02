@@ -3,7 +3,7 @@
 This repository includes an implementation of NMS with variance for PyTorch.
 Computing the variance over possible bounding box and score candidates adds information about the uncertainty of the NMS process.
 This becomes important when using the predicted bounding box in subsequent steps (e.g. tracking) to compensate for high uncertainty predictions.
-There is no performance penalty when computing variances due to native C++ and CUDA code.
+There is only a very slight performance penalty when computing variances due to native C++ and CUDA code.
 
 **Note**: Currently only PyTorch with CUDA is supported as backend. Stay tuned for a CPU version!
 
