@@ -32,7 +32,11 @@ def check_torch_cuda():
 
     # Check if the $CONDA_PREFIX environment variable is set.
     # If it's not set, check if PyTorch and CUDA are globally available, if not exit.
+<<<<<<< HEAD
     if not os.environ.get('CONDA_PREFIX'):
+=======
+    if not os.environ['CONDA_PREFIX']:
+>>>>>>> 1a0dbe8cae0b1220ed5c5a121101e0bac8e5f2be
         print(
             'Please specify the CONDA_PREFIX environment variable. '
             'It should point to you environment folder, e.g. "/home/<user>/conda/env/<env_name>"')
