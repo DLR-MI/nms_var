@@ -372,6 +372,8 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
             " and ",
             scores.size(0))
 
+    at::cuda::CUDAGuard device_guard(dets.device());
+
     if (dets.numel() == 0) {
         return {at::empty({0}, dets.options().dtype(at::kLong))};
     }
@@ -394,16 +396,19 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
 
     dim3 blocks(col_blocks, col_blocks);
     dim3 threads(threadsPerBlock);
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-    AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_cuda_forward", ([&] {
-        nms_map_impl<scalar_t><<<blocks, threads>>>(dets_num,
-                                                    (scalar_t) nms_overlap_thresh,
-                                                    dets.data_ptr<scalar_t>(),
-                                                    idx.data_ptr<int64_t>(),
-                                                    mask.data_ptr<int64_t>());
-    }));
+    AT_DISPATCH_FLOATING_TYPES(
+            dets.scalar_type(), "nms_cuda_forward", ([&] {
+                nms_map_impl<scalar_t><<<blocks, threads, 0, stream>>>(
+                        dets_num,
+                        (scalar_t) nms_overlap_thresh,
+                        dets.data_ptr<scalar_t>(),
+                        idx.data_ptr<int64_t>(),
+                        mask.data_ptr<int64_t>());
+            }));
 
-    nms_reduce_impl<<<1, 1>>>(dets_num, col_blocks, top_k,
+    nms_reduce_impl<<<1, 1, 0, stream>>>(dets_num, col_blocks, top_k,
                               mask.data_ptr<int64_t>(),
                               idx.data_ptr<int64_t>(),
                               keep.data_ptr<int64_t>(),
@@ -425,7 +430,7 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
     threads = {threadsPerBlockLinear, 1, 1};
 
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_mean_impl", ([&] {
-        nms_mean_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
+        nms_mean_impl<scalar_t><<<blocks, threads, 0, stream>>>(parent_ref_index.size(0),
                                                      dets.data_ptr<scalar_t>(),
                                                      scores.data_ptr<scalar_t>(),
                                                      parent_ref_index.data_ptr<int64_t>(),
@@ -435,7 +440,7 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
     }));
 
     AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms_var_impl", ([&] {
-        nms_var_impl<scalar_t><<<blocks, threads>>>(parent_ref_index.size(0),
+        nms_var_impl<scalar_t><<<blocks, threads, 0, stream>>>(parent_ref_index.size(0),
                                                     dets.data_ptr<scalar_t>(),
                                                     scores.data_ptr<scalar_t>(),
                                                     parent_ref_index.data_ptr<int64_t>(),
@@ -478,7 +483,8 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
 
 #endif
 
+    AT_CUDA_CHECK(cudaGetLastError());
+
     return {keep.slice(0, 0, num_to_keep.item<int>()),
             parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA)};
 }
-
