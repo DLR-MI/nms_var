@@ -346,7 +346,7 @@ void nms_var_impl_cpu(const int64_t parent_object_num,
 
 #endif
 
-std::vector<at::Tensor> nms_var_impl_cuda_forward(
+std::vector <at::Tensor> nms_var_impl_cuda_forward(
         const at::Tensor &dets,
         const at::Tensor &scores,
         float nms_overlap_thresh,
@@ -413,14 +413,14 @@ std::vector<at::Tensor> nms_var_impl_cuda_forward(
             }));
 
     nms_reduce_impl<<<1, 1, 0, stream>>>(dets_num, col_blocks, top_k,
-                              mask.data_ptr<int64_t>(),
-                              idx.data_ptr<int64_t>(),
-                              keep.data_ptr<int64_t>(),
-                              parent_ref_index.data_ptr<int64_t>(),
-                              parent_ref_count.data_ptr<int64_t>(),
-                              num_to_keep.data_ptr<int64_t>());
+                                         mask.data_ptr<int64_t>(),
+                                         idx.data_ptr<int64_t>(),
+                                         keep.data_ptr<int64_t>(),
+                                         parent_ref_index.data_ptr<int64_t>(),
+                                         parent_ref_count.data_ptr<int64_t>(),
+                                         num_to_keep.data_ptr<int64_t>());
 
-std::cout << "Passed NMS computation\n" << std::flush;
+    std::cout << "Passed NMS computation\n" << std::flush;
 
 #ifdef COMPUTE_MEAN_VAR_GPU
     // Reshape this to a [num_to_keep, 4] tensor
@@ -490,9 +490,16 @@ std::cout << "Passed NMS computation\n" << std::flush;
 #endif
 
     std::cout << "Passed Variance computation\n" << std::flush;
-    
+
+    // Move to GPU
+    auto parent_object_var_gpu = torch::zeros({num_to_keep.item<int>() * 5},
+                                              torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
+    parent_object_var_gpu = parent_object_var.to(torch::kCUDA);
+
+    std::cout << "Moved memory to CUDA\n" << std::flush;
+
     AT_CUDA_CHECK(cudaGetLastError());
 
     return {keep.slice(0, 0, num_to_keep.item<int>()),
-            parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA)};
+            parent_object_var_gpu.view({num_to_keep.item<int>(), 5})};
 }
