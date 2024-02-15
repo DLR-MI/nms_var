@@ -374,8 +374,6 @@ std::vector <at::Tensor> nms_var_impl_cuda_forward(
             " and ",
             scores.size(0))
 
-    std::cout << "Passed PyTorch checks\n" << std::flush;
-
     at::cuda::CUDAGuard device_guard(dets.device());
 
     if (dets.numel() == 0) {
@@ -419,8 +417,6 @@ std::vector <at::Tensor> nms_var_impl_cuda_forward(
                                          parent_ref_index.data_ptr<int64_t>(),
                                          parent_ref_count.data_ptr<int64_t>(),
                                          num_to_keep.data_ptr<int64_t>());
-
-    std::cout << "Passed NMS computation\n" << std::flush;
 
 #ifdef COMPUTE_MEAN_VAR_GPU
     // Reshape this to a [num_to_keep, 4] tensor
@@ -489,17 +485,8 @@ std::vector <at::Tensor> nms_var_impl_cuda_forward(
 
 #endif
 
-    std::cout << "Passed Variance computation\n" << std::flush;
-
-    // Move to GPU
-    auto parent_object_var_gpu = torch::zeros({num_to_keep.item<int>() * 5},
-                                              torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat));
-    parent_object_var_gpu = parent_object_var.to(torch::kCUDA);
-
-    std::cout << "Moved memory to CUDA\n" << std::flush;
-
     AT_CUDA_CHECK(cudaGetLastError());
 
     return {keep.slice(0, 0, num_to_keep.item<int>()),
-            parent_object_var_gpu.view({num_to_keep.item<int>(), 5})};
+            parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA)};
 }
