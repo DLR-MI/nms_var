@@ -494,7 +494,7 @@ std::vector <at::Tensor> nms_var_forward(
 
 #endif
 
-    std::cout << "iteration: " << iteration << ", info: " << std::endl;
+    std::cout << "iteration: " << iteration << ", top_k: " << top_k << std::endl;
     std::cout << "dets: " << dets.size(0) << ", scores: " << scores.size(0) << ", keep: " << num_to_keep.item<int>() << std::endl;
     iteration++;
 
