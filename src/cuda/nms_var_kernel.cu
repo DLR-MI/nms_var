@@ -346,9 +346,9 @@ void nms_var_impl_cpu(const int64_t parent_object_num,
 
 #endif
 
-std::vector <at::Tensor> nms_var_impl_cuda_forward(
-        const at::Tensor &dets,
-        const at::Tensor &scores,
+std::vector <at::Tensor> nms_var_forward(
+        const at::Tensor dets,
+        const at::Tensor scores,
         float nms_overlap_thresh,
         unsigned long top_k) {
 
@@ -377,7 +377,8 @@ std::vector <at::Tensor> nms_var_impl_cuda_forward(
     at::cuda::CUDAGuard device_guard(dets.device());
 
     if (dets.numel() == 0) {
-        return {at::empty({0}, dets.options().dtype(at::kLong))};
+        return {at::empty({0}, dets.options().dtype(at::kLong)),
+                at::empty({0}, dets.options().dtype(at::kFloat))};
     }
 
     auto idx = std::get<1>(scores.sort(/*stable=*/true, /*dim=*/0, /* descending=*/true));
@@ -487,6 +488,6 @@ std::vector <at::Tensor> nms_var_impl_cuda_forward(
 
     AT_CUDA_CHECK(cudaGetLastError());
 
-    return {keep.slice(0, 0, num_to_keep.item<int>()),
-            parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA)};
+    return {keep.narrow(/*dim=*/0, /*start=*/0, /*length=*/num_to_keep.item<int>()),
+            parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA, parent_object_var.scalar_type())};
 }
