@@ -2,8 +2,8 @@
 #include <torch/types.h>
 
 std::vector<at::Tensor> nms_var_forward(
-        const at::Tensor dets,
-        const at::Tensor scores,
+        const at::Tensor &dets,
+        const at::Tensor &scores,
         float nms_overlap_thresh,
         unsigned long top_k);
 

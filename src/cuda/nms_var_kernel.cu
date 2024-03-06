@@ -347,10 +347,12 @@ void nms_var_impl_cpu(const int64_t parent_object_num,
 #endif
 
 std::vector <at::Tensor> nms_var_forward(
-        const at::Tensor dets,
-        const at::Tensor scores,
+        const at::Tensor &dets,
+        const at::Tensor &scores,
         float nms_overlap_thresh,
         unsigned long top_k) {
+
+    static int iteration = 0;
 
     TORCH_CHECK(dets.is_cuda(), "dets must be a CUDA tensor")
     TORCH_CHECK(scores.is_cuda(), "scores must be a CUDA tensor")
@@ -377,6 +379,8 @@ std::vector <at::Tensor> nms_var_forward(
     at::cuda::CUDAGuard device_guard(dets.device());
 
     if (dets.numel() == 0) {
+        std::cout << "returned empty output on iteration " << iteration << std::endl;
+        iteration++;
         return {at::empty({0}, dets.options().dtype(at::kLong)),
                 at::empty({0}, dets.options().dtype(at::kFloat))};
     }
@@ -485,6 +489,10 @@ std::vector <at::Tensor> nms_var_forward(
                      parent_object_var.data_ptr<float>());
 
 #endif
+
+    std::cout << "iteration: " << iteration << ", info: " << std::endl;
+    std::cout << "dets: " << dets.size(0) << ", scores: " << scores.size(0) << ", keep: " << num_to_keep.item<int>() << std::endl;
+    iteration++;
 
     AT_CUDA_CHECK(cudaGetLastError());
 
