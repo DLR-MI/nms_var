@@ -352,7 +352,7 @@ std::vector <at::Tensor> nms_var_forward(
         float nms_overlap_thresh,
         unsigned long top_k) {
 
-    static int iteration = 0;
+    //static int iteration = 0;
 
     TORCH_CHECK(dets.is_cuda(), "dets must be a CUDA tensor")
     TORCH_CHECK(scores.is_cuda(), "scores must be a CUDA tensor")
@@ -379,8 +379,9 @@ std::vector <at::Tensor> nms_var_forward(
     at::cuda::CUDAGuard device_guard(dets.device());
 
     if (dets.numel() == 0) {
-        std::cout << "returned empty output on iteration " << iteration << std::endl;
-        iteration++;
+        //DEBUG INFO
+        //std::cout << "returned empty output on iteration " << iteration << std::endl;
+        //iteration++;
         return {at::empty({0}, dets.options().dtype(at::kLong)),
                 at::empty({0}, dets.options().dtype(at::kFloat))};
     }
@@ -490,9 +491,10 @@ std::vector <at::Tensor> nms_var_forward(
 
 #endif
 
-    std::cout << "iteration: " << iteration << ", top_k: " << top_k << std::endl;
-    std::cout << "dets: " << dets.size(0) << ", scores: " << scores.size(0) << ", keep: " << num_to_keep.item<int>() << std::endl;
-    iteration++;
+    //DEBUG INFO
+    //std::cout << "iteration: " << iteration << ", top_k: " << top_k << std::endl;
+    //std::cout << "dets: " << dets.size(0) << ", scores: " << scores.size(0) << ", keep: " << num_to_keep.item<int>() << std::endl;
+    //iteration++;
 
     AT_CUDA_CHECK(cudaGetLastError());
 
