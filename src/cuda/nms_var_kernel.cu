@@ -140,7 +140,7 @@ nms_reduce_impl(const int boxes_num,
         parent_ref_count[PARENT_INDEX(parent_object_index[i])] += 1;
     }
 
-    *num_to_keep = min(top_k - 1, num_to_keep_);
+    *num_to_keep = min(top_k, num_to_keep_);
 }
 
 
