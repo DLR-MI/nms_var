@@ -130,17 +130,21 @@ nms_reduce_impl(const int boxes_num,
             parent_object_index[idx[i]] = num_to_keep_ + 1;
             num_to_keep_++;
 
-            if (num_to_keep_ == (top_k - 1))
+            if (num_to_keep_ == top_k)
                 break;
         }
     }
+
+    // Initialize the rest of the keep array to avoid uninitialized values.
+    for (int i = num_to_keep_; i < boxes_num; ++i)
+        keep[i] = 0;
 
     // collect the number of times each parent is referenced
     for (int i = 0; i < boxes_num; i++) {
         parent_ref_count[PARENT_INDEX(parent_object_index[i])] += 1;
     }
 
-    *num_to_keep = min(top_k, num_to_keep_ + 1);
+    *num_to_keep = min(top_k, num_to_keep_);
 }
 
 
@@ -496,6 +500,6 @@ std::vector <at::Tensor> nms_var_forward(
 
     AT_CUDA_CHECK(cudaGetLastError());
 
-    return {keep.narrow(/*dim=*/0, /*start=*/0, /*length=*/num_to_keep.item<int>()),
+    return {keep,//keep.narrow(/*dim=*/0, /*start=*/0, /*length=*/num_to_keep.item<int>()),
             parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA, parent_object_var.scalar_type())};
 }
