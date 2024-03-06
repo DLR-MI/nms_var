@@ -135,10 +135,6 @@ nms_reduce_impl(const int boxes_num,
         }
     }
 
-    // Initialize the rest of the keep array to avoid uninitialized values.
-    for (int i = num_to_keep_; i < boxes_num; ++i)
-        keep[i] = 0;
-
     // collect the number of times each parent is referenced
     for (int i = 0; i < boxes_num; i++) {
         parent_ref_count[PARENT_INDEX(parent_object_index[i])] += 1;
