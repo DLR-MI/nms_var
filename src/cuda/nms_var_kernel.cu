@@ -496,6 +496,6 @@ std::vector <at::Tensor> nms_var_forward(
 
     AT_CUDA_CHECK(cudaGetLastError());
 
-    return {keep,//keep.narrow(/*dim=*/0, /*start=*/0, /*length=*/num_to_keep.item<int>()),
+    return {keep.narrow(/*dim=*/0, /*start=*/0, /*length=*/num_to_keep.item<int>()),
             parent_object_var.view({num_to_keep.item<int>(), 5}).to(torch::kCUDA, parent_object_var.scalar_type())};
 }
