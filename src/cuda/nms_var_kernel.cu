@@ -130,7 +130,7 @@ nms_reduce_impl(const int boxes_num,
             parent_object_index[idx[i]] = num_to_keep_ + 1;
             num_to_keep_++;
 
-            if (num_to_keep_ == top_k)
+            if (num_to_keep_ == (top_k - 1))
                 break;
         }
     }
@@ -140,7 +140,7 @@ nms_reduce_impl(const int boxes_num,
         parent_ref_count[PARENT_INDEX(parent_object_index[i])] += 1;
     }
 
-    *num_to_keep = min(top_k, num_to_keep_);
+    *num_to_keep = min(top_k - 1, num_to_keep_);
 }
 
 
